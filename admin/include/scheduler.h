@@ -19,6 +19,10 @@ int scheduler_submit(Scheduler *scheduler, const char *order_number,
                      const char *menu, int priority,
                      unsigned int cook_time_ms);
 bool scheduler_cancel(Scheduler *scheduler, unsigned int order_id);
+bool scheduler_start_order(Scheduler *scheduler, unsigned int order_id);
+bool scheduler_complete_order(Scheduler *scheduler, unsigned int order_id);
+bool scheduler_get_order(Scheduler *scheduler, unsigned int order_id,
+                         Order *order);
 size_t scheduler_snapshot(Scheduler *scheduler, Order *orders,
                           size_t capacity);
 bool scheduler_wait_idle(Scheduler *scheduler, unsigned int timeout_ms);

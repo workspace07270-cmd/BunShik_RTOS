@@ -214,7 +214,8 @@ bool scheduler_cancel(Scheduler *scheduler, unsigned int order_id)
     pthread_mutex_lock(&scheduler->mutex);
     for (size_t index = 0; index < scheduler->order_count; ++index) {
         if (scheduler->orders[index].id == order_id &&
-            scheduler->orders[index].status == ORDER_RECEIVED) {
+            (scheduler->orders[index].status == ORDER_RECEIVED ||
+             scheduler->orders[index].status == ORDER_COOKING)) {
             scheduler->orders[index].status = ORDER_CANCELED;
             canceled = true;
             break;
@@ -225,6 +226,58 @@ bool scheduler_cancel(Scheduler *scheduler, unsigned int order_id)
     }
     pthread_mutex_unlock(&scheduler->mutex);
     return canceled;
+}
+
+bool scheduler_start_order(Scheduler *scheduler, unsigned int order_id)
+{
+    if (scheduler == NULL) return false;
+    bool changed = false;
+    pthread_mutex_lock(&scheduler->mutex);
+    for (size_t index = 0; index < scheduler->order_count; ++index) {
+        if (scheduler->orders[index].id == order_id &&
+            scheduler->orders[index].status == ORDER_RECEIVED) {
+            scheduler->orders[index].status = ORDER_COOKING;
+            changed = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&scheduler->mutex);
+    return changed;
+}
+
+bool scheduler_complete_order(Scheduler *scheduler, unsigned int order_id)
+{
+    if (scheduler == NULL) return false;
+    bool changed = false;
+    pthread_mutex_lock(&scheduler->mutex);
+    for (size_t index = 0; index < scheduler->order_count; ++index) {
+        if (scheduler->orders[index].id == order_id &&
+            scheduler->orders[index].status == ORDER_COOKING) {
+            scheduler->orders[index].status = ORDER_COMPLETED;
+            changed = true;
+            break;
+        }
+    }
+    if (is_idle(scheduler)) pthread_cond_broadcast(&scheduler->idle);
+    pthread_mutex_unlock(&scheduler->mutex);
+    return changed;
+}
+
+bool scheduler_get_order(Scheduler *scheduler, unsigned int order_id,
+                         Order *order)
+{
+    if (scheduler == NULL || order == NULL) return false;
+    bool found = false;
+    pthread_mutex_lock(&scheduler->mutex);
+    for (size_t index = 0; index < scheduler->order_count; ++index) {
+        if (scheduler->orders[index].id == order_id) {
+            *order = scheduler->orders[index];
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&scheduler->mutex);
+    return found;
 }
 
 size_t scheduler_snapshot(Scheduler *scheduler, Order *orders, size_t capacity)
