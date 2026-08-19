@@ -12,7 +12,7 @@
 #include <unistd.h>
 
 #define REQUEST_CAPACITY 1024
-#define RAW_RESPONSE_CAPACITY 4096
+#define RAW_RESPONSE_CAPACITY 65536
 
 /*
  * "http://localhost:8080" 같은 주소를 host="localhost", port=8080으로 나눕니다.
@@ -68,7 +68,11 @@ static int connect_server(const http_server_t *server) {
         struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
         (void) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         (void) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-        if (connect(fd, address->ai_addr, address->ai_addrlen) == 0) break;
+        int connected;
+        do {
+            connected = connect(fd, address->ai_addr, address->ai_addrlen);
+        } while (connected < 0 && errno == EINTR);
+        if (connected == 0 || (connected < 0 && errno == EISCONN)) break;
         close(fd);
         fd = -1;
     }
@@ -178,7 +182,8 @@ int customer_http_request(const http_server_t *server, const char *method,
         const char *path, const char *json_body, char *response_body,
         size_t response_capacity, http_response_t *response) {
     char request[REQUEST_CAPACITY];
-    char raw[RAW_RESPONSE_CAPACITY];
+    char *raw = malloc(RAW_RESPONSE_CAPACITY);
+    if (raw == NULL) return -1;
     size_t body_length = json_body == NULL ? 0 : strlen(json_body);
     size_t received = 0;
     /* 메서드, 경로, 헤더, JSON 본문을 하나의 HTTP/1.1 요청 문자열로 만듭니다. */
@@ -188,27 +193,33 @@ int customer_http_request(const http_server_t *server, const char *method,
             "Connection: close\r\n\r\n%s",
             method, path, server->host, server->port, body_length,
             json_body == NULL ? "" : json_body);
-    if (length < 0 || (size_t) length >= sizeof(request)) return -1;
+    if (length < 0 || (size_t) length >= sizeof(request)) {
+        free(raw);
+        return -1;
+    }
 
     /* TCP 연결 -> 요청 전송 -> 응답 수신 -> 연결 종료 순서로 처리합니다. */
     int fd = connect_server(server);
     if (fd < 0) {
         fprintf(stderr, "[HTTP] %s:%u 연결 실패: %s\n",
                 server->host, server->port, strerror(errno));
+        free(raw);
         return -1;
     }
     if (send_all(fd, request, (size_t) length) < 0) {
         fprintf(stderr, "[HTTP] 요청 전송 실패: %s %s (%s)\n",
                 method, path, strerror(errno));
         close(fd);
+        free(raw);
         return -1;
     }
     /*
      * recv()는 서버 응답을 한 조각씩 가져옵니다. 한 번 호출했다고 전체
      * HTTP 응답이 오는 것은 아니므로 끝을 만날 때까지 raw 배열에 누적합니다.
      */
-    while (received + 1 < sizeof(raw)) {
-        ssize_t count = recv(fd, raw + received, sizeof(raw) - received - 1, 0);
+    while (received + 1 < RAW_RESPONSE_CAPACITY) {
+        ssize_t count = recv(fd, raw + received,
+                RAW_RESPONSE_CAPACITY - received - 1, 0);
         if (count == 0) break;
         if (count < 0) {
             /*
@@ -226,6 +237,7 @@ int customer_http_request(const http_server_t *server, const char *method,
             fprintf(stderr, "[HTTP] 응답 수신 실패: %s %s (%s)\n",
                     method, path, strerror(errno));
             close(fd);
+            free(raw);
             return -1;
         }
         received += (size_t) count;
@@ -251,5 +263,6 @@ int customer_http_request(const http_server_t *server, const char *method,
                 "[HTTP] 응답 해석 실패: %s %s, 받은 크기=%zu bytes\n",
                 method, path, received);
     }
+    free(raw);
     return parse_result;
 }

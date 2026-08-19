@@ -1,9 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "admin_logger.h"
+#include "rtos_runtime.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +15,7 @@
 #define LOG_LINE_LENGTH 1024
 #define LOG_TAIL_MAX 1000
 
-static pthread_mutex_t logger_mutex = PTHREAD_MUTEX_INITIALIZER;
+static RtosMutex logger_mutex;
 static char logger_directory[LOG_PATH_LENGTH];
 static char logger_path[LOG_PATH_LENGTH];
 static bool logger_ready;
@@ -44,34 +44,36 @@ static const char *level_name(AdminLogLevel level)
 bool admin_logger_init(const char *directory)
 {
     if (directory == NULL || directory[0] == '\0') return false;
-    pthread_mutex_lock(&logger_mutex);
+    if (logger_mutex == NULL && rtos_mutex_init(&logger_mutex) != 0)
+        return false;
+    rtos_mutex_lock(&logger_mutex);
     snprintf(logger_directory, sizeof(logger_directory), "%s", directory);
     if (mkdir(logger_directory, 0755) != 0 && errno != EEXIST) {
-        pthread_mutex_unlock(&logger_mutex);
+        rtos_mutex_unlock(&logger_mutex);
         return false;
     }
     logger_ready = update_log_path();
-    pthread_mutex_unlock(&logger_mutex);
+    rtos_mutex_unlock(&logger_mutex);
     return logger_ready;
 }
 
 void admin_logger_close(void)
 {
-    pthread_mutex_lock(&logger_mutex);
+    rtos_mutex_lock(&logger_mutex);
     logger_ready = false;
-    pthread_mutex_unlock(&logger_mutex);
+    rtos_mutex_unlock(&logger_mutex);
 }
 
 void admin_log(AdminLogLevel level, const char *format, ...)
 {
-    pthread_mutex_lock(&logger_mutex);
+    rtos_mutex_lock(&logger_mutex);
     if (!logger_ready || !update_log_path()) {
-        pthread_mutex_unlock(&logger_mutex);
+        rtos_mutex_unlock(&logger_mutex);
         return;
     }
     FILE *file = fopen(logger_path, "a");
     if (file == NULL) {
-        pthread_mutex_unlock(&logger_mutex);
+        rtos_mutex_unlock(&logger_mutex);
         return;
     }
     time_t now = time(NULL);
@@ -86,26 +88,26 @@ void admin_log(AdminLogLevel level, const char *format, ...)
     va_end(arguments);
     fputc('\n', file);
     fclose(file);
-    pthread_mutex_unlock(&logger_mutex);
+    rtos_mutex_unlock(&logger_mutex);
 }
 
 bool admin_log_tail(size_t line_count)
 {
     if (line_count == 0 || line_count > LOG_TAIL_MAX) return false;
-    pthread_mutex_lock(&logger_mutex);
+    rtos_mutex_lock(&logger_mutex);
     if (!logger_ready || !update_log_path()) {
-        pthread_mutex_unlock(&logger_mutex);
+        rtos_mutex_unlock(&logger_mutex);
         return false;
     }
     FILE *file = fopen(logger_path, "r");
     if (file == NULL) {
-        pthread_mutex_unlock(&logger_mutex);
+        rtos_mutex_unlock(&logger_mutex);
         return false;
     }
     char **lines = calloc(line_count, sizeof(*lines));
     if (lines == NULL) {
         fclose(file);
-        pthread_mutex_unlock(&logger_mutex);
+        rtos_mutex_unlock(&logger_mutex);
         return false;
     }
     size_t total = 0;
@@ -125,7 +127,7 @@ bool admin_log_tail(size_t line_count)
     }
     for (size_t index = 0; index < line_count; ++index) free(lines[index]);
     free(lines);
-    pthread_mutex_unlock(&logger_mutex);
+    rtos_mutex_unlock(&logger_mutex);
     return true;
 }
 

@@ -38,19 +38,18 @@ enable_testing()
 
 add_library(bunshik_core
     src/admin_logger.c
-    src/admin_main.c
+    src/admin_service.c
     src/backend_client.c
     src/customer_http_client.c
     src/customer_main.c
     src/http_client.c
-    src/order.c
     src/order_priority.c
     src/print_job.c
     src/printer.c
-    src/scheduler.c
+    src/rtos_runtime.c
 )
 target_include_directories(bunshik_core PUBLIC include)
-target_link_libraries(bunshik_core PUBLIC Threads::Threads freertos_kernel freertos_config)
+target_link_libraries(bunshik_core PUBLIC freertos_kernel freertos_config)
 
 add_executable(bunshik_rtos src/main.c)
 target_link_libraries(bunshik_rtos PRIVATE bunshik_core)

@@ -1,52 +1,43 @@
 #include "admin_mode.h"
 #include "customer_mode.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-static const char *customer_backend_url(void)
+static const char *environment(const char *name, const char *fallback)
 {
-    const char *url = getenv("BUNSHIK_CUSTOMER_API_BASE_URL");
-    if (url != NULL && url[0] != '\0') return url;
-    url = getenv("BUNSHIK_API_BASE_URL");
-    return url != NULL && url[0] != '\0' ? url : "http://localhost:8080";
+    const char *value = getenv(name);
+    return value != NULL && value[0] != '\0' ? value : fallback;
 }
 
-static void print_usage(const char *program)
+int main(void)
 {
-    printf("사용법:\n");
-    printf("  %s admin\n", program);
-    printf("  %s customer [백엔드URL]\n", program);
-    printf("  %s                 대화형 모드 선택\n", program);
-}
+    const char *backend_url = environment("BUNSHIK_API_BASE_URL",
+            "http://127.0.0.1:8080");
+    const char *username = environment("BUNSHIK_ADMIN_USERNAME", "");
+    const char *password = environment("BUNSHIK_ADMIN_PASSWORD", "");
 
-int main(int argc, char **argv)
-{
-    if (argc >= 2) {
-        if (strcmp(argv[1], "admin") == 0 && argc == 2) return admin_run();
-        if (strcmp(argv[1], "customer") == 0 && argc <= 3)
-            return customer_run(argc == 3 ? argv[2] : customer_backend_url());
-        print_usage(argv[0]);
+    puts("BunShik 통합 FreeRTOS 서비스");
+    printf("백엔드: %s\n", backend_url);
+
+    if (username[0] == '\0' || password[0] == '\0') {
+        fputs("관리자 자동 로그인 정보가 없습니다. make setup을 실행하세요.\n",
+              stderr);
+        return EXIT_FAILURE;
+    }
+    if (admin_tasks_start(backend_url, username, password) != EXIT_SUCCESS) {
+        fputs("관리자 RTOS 태스크를 만들지 못했습니다.\n", stderr);
+        return EXIT_FAILURE;
+    }
+    if (customer_tasks_start(backend_url) != EXIT_SUCCESS) {
+        fputs("고객 출력 RTOS 태스크를 만들지 못했습니다.\n", stderr);
         return EXIT_FAILURE;
     }
 
-    puts("BunShik RTOS");
-    puts("1. 관리자 모드");
-    puts("2. 고객 출력 모드");
-    puts("0. 종료");
-    printf("선택> ");
-    fflush(stdout);
-
-    char choice[16];
-    if (fgets(choice, sizeof(choice), stdin) == NULL) return EXIT_SUCCESS;
-    if (strcmp(choice, "1\n") == 0 || strcmp(choice, "1") == 0)
-        return admin_run();
-    if (strcmp(choice, "2\n") == 0 || strcmp(choice, "2") == 0)
-        return customer_run(customer_backend_url());
-    if (strcmp(choice, "0\n") == 0 || strcmp(choice, "0") == 0)
-        return EXIT_SUCCESS;
-
-    puts("올바른 모드를 선택하세요.");
+    puts("[RTOS] 관리자 주문 감시와 고객 출력 태스크 시작");
+    puts("[RTOS] 종료: Ctrl+C");
+    vTaskStartScheduler();
     return EXIT_FAILURE;
 }

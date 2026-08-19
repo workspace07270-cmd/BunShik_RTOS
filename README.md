@@ -1,8 +1,8 @@
 # BunShik RTOS
 
-WSL Ubuntu에서 실행되는 분식집 주문 처리 RTOS 시뮬레이터입니다. 기존
-BunShik Spring Boot 백엔드와 REST API로 연결하며, 핵심 주문 처리 흐름은
-C와 POSIX thread로 모델링합니다.
+WSL Ubuntu에서 FreeRTOS POSIX 포트로 실행되는 분식집 주문 처리 RTOS
+시뮬레이터입니다. 기존 BunShik Spring Boot 백엔드와 REST API로 연결하며,
+관리자와 고객 출력 기능을 FreeRTOS Task와 Semaphore로 처리합니다.
 
 ## 현재 구현
 
@@ -18,11 +18,26 @@ C와 POSIX thread로 모델링합니다.
 - 기존 관리자 주문 화면과 같은 날짜·유형·상태 검색 및 알림음
 - 관리자가 `접수 -> 조리중 -> 완료` 상태를 직접 변경
 - 접수·조리 중 주문 취소와 잘못된 상태 전이 차단
-- 작업 스레드 기반 `접수 -> 조리중 -> 완료` 처리
-- mutex와 condition variable을 이용한 공유 상태 보호
-- 기본 스케줄러 테스트
+- FreeRTOS 관리자 CLI Task와 주문 감시 Task
+- FreeRTOS 고객 연결·출력 감시·인쇄 Worker Task
+- FreeRTOS Mutex, Binary Semaphore와 Task Notification 기반 동기화
 
 ## 빌드와 실행
+
+프로젝트 최상위 폴더에서 다음 한 줄로 구성·빌드·실행합니다.
+
+```bash
+make setup  # 최초 한 번: 관리자 자동 로그인 계정 저장
+make run
+```
+
+백엔드가 다른 주소라면 실행할 때 지정합니다.
+
+```bash
+BUNSHIK_ADMIN_USERNAME=관리자아이디 \
+BUNSHIK_ADMIN_PASSWORD=관리자비밀번호 \
+make run BUNSHIK_API_BASE_URL=http://서버주소:8080
+```
 
 ```bash
 cmake -S . -B build
@@ -45,26 +60,17 @@ make run
 cmake -S . -B build -DBUNSHIK_API_BASE_URL=http://서버주소:8080
 ```
 
-실행 파일은 하나이며, 시작할 때 관리자 모드와 고객 출력 모드 중 하나를
-선택합니다. 모드를 명령행에서 바로 지정할 수도 있습니다.
-
-```bash
-./build/bunshik_rtos admin
-./build/bunshik_rtos customer
-```
+실행 파일을 시작하면 명령을 입력하지 않습니다. 하나의 FreeRTOS 스케줄러에서
+고객 출력 태스크가 자동으로 시작됩니다. 관리자 계정 환경변수까지 설정하면
+관리자 자동 로그인·주문 감시 태스크도 동시에 시작됩니다. 주문
+상태 변경은 기존 React 관리자 화면에서 수행하며 RTOS는 변경을 자동 감지해
+이벤트 Queue로 전달합니다.
 
 기본 백엔드 주소는 `http://127.0.0.1:8080`입니다. 다른 주소라면 실행 전에
 환경변수를 지정합니다.
 
 ```bash
-BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/bunshik_rtos admin
-```
-
-고객 모드만 별도 주소를 사용해야 한다면
-`BUNSHIK_CUSTOMER_API_BASE_URL`을 지정하거나 URL을 마지막 인자로 넘깁니다.
-
-```bash
-./build/bunshik_rtos customer http://서버주소:8080
+BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/bunshik_rtos
 ```
 
 CLI에서 `help`를 입력하면 명령 목록을 볼 수 있습니다.

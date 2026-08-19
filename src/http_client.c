@@ -129,7 +129,12 @@ int http_request(const char *base_url, const char *method, const char *path,
         struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
         setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-        if (connect(socket_fd, address->ai_addr, address->ai_addrlen) == 0) break;
+        int connected;
+        do {
+            connected = connect(socket_fd, address->ai_addr,
+                                address->ai_addrlen);
+        } while (connected < 0 && errno == EINTR);
+        if (connected == 0 || (connected < 0 && errno == EISCONN)) break;
         close(socket_fd);
         socket_fd = -1;
     }

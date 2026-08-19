@@ -4,30 +4,34 @@
 #include "print_job.h"
 #include "printer.h"
 #include "FreeRTOS.h"
+#include "semphr.h"
 #include "task.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define POLL_INTERVAL_MS         1000
 #define RESPONSE_BUFFER_SIZE     4096
 #define SERVER_CHECK_RETRY_MS    2000
 
 static http_server_t spring_server;
-/* 인쇄 태스크가 이미 실행 중이면 새 폴링 결과를 잠시 무시합니다. */
-static volatile BaseType_t print_task_running = pdFALSE;
+/* 토큰을 가진 폴링 태스크 하나만 새 출력 작업을 시작할 수 있습니다. */
+static SemaphoreHandle_t print_slot;
 
 /*
  * 태스크를 만들기 전에 Spring Boot 서버가 응답하는지 확인합니다.
- * pending 목록을 조회해 TCP 연결과 HTTP 응답이 정상인지 함께 검사합니다.
+ * 출력 작업의 DB 상태와 무관한 기존 메뉴 API로 서버 기동 여부를 검사합니다.
  */
 static BaseType_t check_server_connection(void) {
     char body[256];
     http_response_t response = {0};
-    return customer_http_request(&spring_server, "GET", "/api/print-jobs/pending", NULL,
-            body, sizeof(body), &response) == 0 ? pdTRUE : pdFALSE;
+    int result = customer_http_request(&spring_server, "GET", "/api/menus",
+            NULL, body, sizeof(body), &response);
+    if (result == 0 && response.status_code != 200)
+        fprintf(stderr, "[BunShik Customer RTOS] 백엔드 확인 응답 코드: %d\n",
+                response.status_code);
+    return result == 0 && response.status_code == 200 ? pdTRUE : pdFALSE;
 }
 
 static int fetch_pending(PrintJob *job) {
@@ -85,7 +89,7 @@ static void print_task(void *parameter) {
 
     handle_job(&job);
 
-    print_task_running = pdFALSE;
+    xSemaphoreGive(print_slot);
     vTaskDelete(NULL);
 }
 
@@ -93,7 +97,7 @@ static void print_task(void *parameter) {
 static void print_poll_task(void *parameter) {
     (void) parameter;
     for (;;) {
-        if (!print_task_running) {
+        if (xSemaphoreTake(print_slot, 0) == pdTRUE) {
             PrintJob parsed;
             int result = fetch_pending(&parsed);
 
@@ -101,13 +105,14 @@ static void print_poll_task(void *parameter) {
                 PrintJob *job = pvPortMalloc(sizeof(*job));
                 if (job != NULL) {
                     *job = parsed;
-                    print_task_running = pdTRUE;
                     if (xTaskCreate(print_task, "PrintTask", 4096,
                             job, 3, NULL) != pdPASS) {
-                        print_task_running = pdFALSE;
                         vPortFree(job);
+                        xSemaphoreGive(print_slot);
                     }
-                }
+                } else xSemaphoreGive(print_slot);
+            } else {
+                xSemaphoreGive(print_slot);
             }
             /* result == 0: 대기 중 작업 없음, result == -1: 조회 실패(다음 폴링에 재시도) */
         }
@@ -115,35 +120,41 @@ static void print_poll_task(void *parameter) {
     }
 }
 
-void vApplicationMallocFailedHook(void) { abort(); }
-
-int customer_run(const char *url) {
-    if (customer_http_server_parse(url, &spring_server) < 0) {
-        fprintf(stderr, "서버 주소를 해석할 수 없습니다: %s\n", url);
-        return EXIT_FAILURE;
-    }
-
-    /*
-     * 스케줄러를 시작하고 태스크를 만들기 전에, 먼저 Spring Boot 서버가
-     * 살아있는지 확인합니다. 서버가 아직 준비되지 않았다면 태스크를 만들지
-     * 않고 일정 간격으로 재시도합니다.
-     */
+static void customer_boot_task(void *parameter)
+{
+    const char *url = parameter;
     printf("[BunShik Customer RTOS] 서버 연결 확인 중: %s\n", url);
     while (check_server_connection() != pdTRUE) {
         fprintf(stderr,
                 "[BunShik Customer RTOS] 서버에 연결할 수 없습니다. %d ms 후 재시도합니다: %s\n",
                 SERVER_CHECK_RETRY_MS, url);
-        struct timespec wait_time = {
-            .tv_sec = SERVER_CHECK_RETRY_MS / 1000,
-            .tv_nsec = (SERVER_CHECK_RETRY_MS % 1000) * 1000000L,
-        };
-        nanosleep(&wait_time, NULL);
+        vTaskDelay(pdMS_TO_TICKS(SERVER_CHECK_RETRY_MS));
     }
     printf("[BunShik Customer RTOS] 서버 연결 확인 완료: %s\n", url);
 
-    /* 연결이 확인된 뒤에야 폴링 태스크를 만들고 스케줄러를 시작합니다. */
+    /* 연결이 확인된 뒤에야 동기화 객체와 폴링 태스크를 만듭니다. */
+    print_slot = xSemaphoreCreateBinary();
+    configASSERT(print_slot != NULL);
+    xSemaphoreGive(print_slot);
     configASSERT(xTaskCreate(print_poll_task, "PrintPollTask",
             2048, NULL, 2, NULL) == pdPASS);
+    vTaskDelete(NULL);
+}
+
+int customer_tasks_start(const char *url) {
+    if (customer_http_server_parse(url, &spring_server) < 0) {
+        fprintf(stderr, "서버 주소를 해석할 수 없습니다: %s\n", url);
+        return EXIT_FAILURE;
+    }
+
+    configASSERT(xTaskCreate(customer_boot_task, "CustomerBootTask",
+            2048, (void *)url, 2, NULL) == pdPASS);
+
+    return EXIT_SUCCESS;
+}
+
+int customer_run(const char *url) {
+    if (customer_tasks_start(url) != EXIT_SUCCESS) return EXIT_FAILURE;
 
     printf("[BunShik Customer RTOS] FreeRTOS 스케줄러 시작\n");
     vTaskStartScheduler();

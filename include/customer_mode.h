@@ -2,5 +2,6 @@
 #define BUNSHIK_CUSTOMER_MODE_H
 
 int customer_run(const char *backend_url);
+int customer_tasks_start(const char *backend_url);
 
 #endif
