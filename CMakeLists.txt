@@ -55,4 +55,15 @@ target_link_libraries(bunshik_core PUBLIC Threads::Threads freertos_kernel freer
 add_executable(bunshik_rtos src/main.c)
 target_link_libraries(bunshik_rtos PRIVATE bunshik_core)
 
+set(BUNSHIK_API_BASE_URL "http://172.23.0.1:8080" CACHE STRING
+    "Spring Boot backend URL used by the run target")
+add_custom_target(run
+    COMMAND ${CMAKE_COMMAND} -E env
+        "BUNSHIK_API_BASE_URL=${BUNSHIK_API_BASE_URL}"
+        $<TARGET_FILE:bunshik_rtos>
+    DEPENDS bunshik_rtos
+    USES_TERMINAL
+    COMMENT "Running BunShik RTOS (${BUNSHIK_API_BASE_URL})"
+)
+
 add_subdirectory(tests)

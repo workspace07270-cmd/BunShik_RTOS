@@ -31,6 +31,20 @@ ctest --test-dir build --output-on-failure
 ./build/bunshik_rtos
 ```
 
+CMake 구성 후에는 빌드 폴더에서 `make run`으로 빌드와 실행을 한 번에 할 수
+있습니다. 기본 백엔드 주소는 `http://172.23.0.1:8080`입니다.
+
+```bash
+cd build
+make run
+```
+
+다른 백엔드 주소를 기본값으로 사용하려면 다시 구성합니다.
+
+```bash
+cmake -S . -B build -DBUNSHIK_API_BASE_URL=http://서버주소:8080
+```
+
 실행 파일은 하나이며, 시작할 때 관리자 모드와 고객 출력 모드 중 하나를
 선택합니다. 모드를 명령행에서 바로 지정할 수도 있습니다.
 
