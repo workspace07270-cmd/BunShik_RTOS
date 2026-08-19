@@ -12,4 +12,5 @@ find_package(Threads REQUIRED)
 
 enable_testing()
 add_subdirectory(admin)
+add_subdirectory(customer)
 add_subdirectory(tests)
