@@ -1,11 +1,16 @@
 # BunShik RTOS
 
 WSL Ubuntu에서 실행되는 분식집 주문 처리 RTOS 시뮬레이터입니다. 기존
-BunShik 키오스크의 관리자 주문 처리 흐름을 C와 POSIX thread로 모델링합니다.
+BunShik Spring Boot 백엔드와 REST API로 연결하며, 핵심 주문 처리 흐름은
+C와 POSIX thread로 모델링합니다.
 
 ## 현재 구현
 
-- 관리자 CLI에서 주문 접수·상세 조회·상태별 목록 조회
+- Spring Boot 관리자 로그인 및 JWT 인증
+- 실제 백엔드 주문 목록 조회
+- 실제 주문 상태 변경과 취소
+- 10초 주기의 백엔드 주문 감시 태스크와 신규 주문 알림
+- 활성·접수·조리중·완료·전체 주문 필터
 - 관리자가 `접수 -> 조리중 -> 완료` 상태를 직접 변경
 - 접수·조리 중 주문 취소와 잘못된 상태 전이 차단
 - 우선순위 주문 큐 (같은 우선순위는 FIFO)
@@ -22,13 +27,22 @@ ctest --test-dir build --output-on-failure
 ./build/admin/bunshik_admin
 ```
 
+기본 백엔드 주소는 `http://127.0.0.1:8080`입니다. 다른 주소라면 실행 전에
+환경변수를 지정합니다.
+
+```bash
+BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/admin/bunshik_admin
+```
+
 CLI에서 `help`를 입력하면 명령 목록을 볼 수 있습니다.
 
 ```text
-receive 101 1 2000 떡볶이 1인분
+login 관리자아이디 관리자비밀번호
+sync
+list active
+list received
 start 1
-detail 1
 complete 1
-list completed
+cancel 2
 quit
 ```
