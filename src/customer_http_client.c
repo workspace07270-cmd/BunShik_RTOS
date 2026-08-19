@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200112L
 
-#include "http_client.h"
+#include "customer_http_client.h"
 
 #include <errno.h>
 #include <netdb.h>
@@ -18,7 +18,7 @@
  * "http://localhost:8080" 같은 주소를 host="localhost", port=8080으로 나눕니다.
  * 이 예제는 학습용이므로 암호화된 https:// 주소는 처리하지 않습니다.
  */
-int http_server_parse(const char *url, http_server_t *server) {
+int customer_http_server_parse(const char *url, http_server_t *server) {
     const char *prefix = "http://";
     const char *host;
     const char *colon;
@@ -174,7 +174,7 @@ static int parse_response(char *raw, size_t raw_length, char *body_out,
     return 0;
 }
 
-int http_request(const http_server_t *server, const char *method,
+int customer_http_request(const http_server_t *server, const char *method,
         const char *path, const char *json_body, char *response_body,
         size_t response_capacity, http_response_t *response) {
     char request[REQUEST_CAPACITY];

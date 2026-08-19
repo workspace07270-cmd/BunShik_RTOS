@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 199309L
-#include "http_client.h"
+#include "customer_http_client.h"
 #include "print_job.h"
 #include "printer.h"
 
@@ -25,7 +25,7 @@ static int fetch_pending(const http_server_t *server, PrintJob *job) {
     char body[RESPONSE_BUFFER_SIZE];
     http_response_t response = {0};
 
-    if (http_request(server, "GET", "/api/print-jobs/pending", NULL,
+    if (customer_http_request(server, "GET", "/api/print-jobs/pending", NULL,
             body, sizeof(body), &response) != 0 || response.status_code != 200) {
         return -1;
     }
@@ -39,7 +39,7 @@ static void complete_job(const http_server_t *server, long job_id, const char *r
     snprintf(path, sizeof(path), "/api/print-jobs/%ld/complete", job_id);
     snprintf(json, sizeof(json), "{\"result\":\"%s\"}", result);
 
-    if (http_request(server, "PATCH", path, json, body, sizeof(body), &response) == 0 &&
+    if (customer_http_request(server, "PATCH", path, json, body, sizeof(body), &response) == 0 &&
             response.status_code == 200) {
         printf("[PrintTask] 완료 신호 전송: id=%ld\n", job_id);
     } else {
@@ -65,11 +65,10 @@ static void handle_job(const http_server_t *server, const PrintJob *job) {
     }
 }
 
-int main(int argc, char **argv) {
-    const char *url = argc >= 2 ? argv[1] : "http://localhost:8080";
+int customer_run(const char *url) {
     http_server_t server;
 
-    if (http_server_parse(url, &server) < 0) {
+    if (customer_http_server_parse(url, &server) < 0) {
         fprintf(stderr, "서버 주소를 해석할 수 없습니다: %s\n", url);
         return EXIT_FAILURE;
     }

@@ -15,6 +15,7 @@ C와 POSIX thread로 모델링합니다.
 - 네트워크 지수 재시도, JWT 만료 감지 및 변경 상태 재확인
 - 날짜별 관리자 작업 로그와 안전 종료
 - 기존 백엔드 API를 이용한 다중 주문 상태 변경과 취소
+- 기존 관리자 주문 화면과 같은 날짜·유형·상태 검색 및 알림음
 - 관리자가 `접수 -> 조리중 -> 완료` 상태를 직접 변경
 - 접수·조리 중 주문 취소와 잘못된 상태 전이 차단
 - 작업 스레드 기반 `접수 -> 조리중 -> 완료` 처리
@@ -27,14 +28,29 @@ C와 POSIX thread로 모델링합니다.
 cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
-./build/admin/bunshik_admin
+./build/bunshik_rtos
+```
+
+실행 파일은 하나이며, 시작할 때 관리자 모드와 고객 출력 모드 중 하나를
+선택합니다. 모드를 명령행에서 바로 지정할 수도 있습니다.
+
+```bash
+./build/bunshik_rtos admin
+./build/bunshik_rtos customer
 ```
 
 기본 백엔드 주소는 `http://127.0.0.1:8080`입니다. 다른 주소라면 실행 전에
 환경변수를 지정합니다.
 
 ```bash
-BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/admin/bunshik_admin
+BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/bunshik_rtos admin
+```
+
+고객 모드만 별도 주소를 사용해야 한다면
+`BUNSHIK_CUSTOMER_API_BASE_URL`을 지정하거나 URL을 마지막 인자로 넘깁니다.
+
+```bash
+./build/bunshik_rtos customer http://서버주소:8080
 ```
 
 CLI에서 `help`를 입력하면 명령 목록을 볼 수 있습니다.

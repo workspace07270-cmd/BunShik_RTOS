@@ -43,6 +43,7 @@ typedef struct {
     unsigned int warned_order_ids[BACKEND_MAX_ORDERS];
     size_t warned_order_count;
     time_t last_successful_sync;
+    bool sound_enabled;
 } AdminMonitor;
 
 static bool is_active(const BackendOrder *order)
@@ -157,6 +158,7 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
             if (is_active(&fresh[index]) &&
                 !known_order(monitor, fresh[index].order_id)) {
                 printf("\n[신규 주문] ");
+                if (monitor->sound_enabled) putchar('\a');
                 print_order(&fresh[index]);
                 admin_log(ADMIN_LOG_INFO, "신규 주문 감지: ID=%u 번호=%s 상태=%s",
                           fresh[index].order_id, fresh[index].order_number,
@@ -229,6 +231,7 @@ static void print_help(void)
     puts("  login <아이디>               비밀번호는 숨김 입력");
     puts("  sync                         즉시 백엔드 동기화");
     puts("  list [active|received|cooking|delayed|completed|all]");
+    puts("  search <날짜|all> <유형|all> <상태|all>");
     puts("  detail <백엔드주문ID>        메뉴·옵션·세트 상세 조회");
     puts("  start <백엔드주문ID>         접수 -> 조리중");
     puts("  complete <백엔드주문ID>      조리중 -> 완료");
@@ -239,6 +242,7 @@ static void print_help(void)
     puts("  server                       연결 대상 표시");
     puts("  connection                   연결·인증·동기화 상태");
     puts("  log [줄수]                   오늘의 최근 로그 조회");
+    puts("  sound [on|off|status]        신규 주문 알림음 설정");
     puts("  help | quit");
 }
 
@@ -387,6 +391,57 @@ static void print_cached_orders(AdminMonitor *monitor, const char *filter)
     pthread_mutex_unlock(&monitor->mutex);
 }
 
+static bool valid_search_date(const char *date)
+{
+    if (strcmp(date, "all") == 0) return true;
+    int year, month, day;
+    char extra;
+    return sscanf(date, "%4d-%2d-%2d%c", &year, &month, &day, &extra) == 3 &&
+           year >= 2000 && month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+static bool search_matches(const BackendOrder *order, const char *date,
+                           const char *type, const char *status)
+{
+    bool date_matches = strcmp(date, "all") == 0 ||
+                        strncmp(order->created_at, date, 10) == 0;
+    bool type_matches = strcmp(type, "all") == 0 ||
+                        strcmp(order->order_type, type) == 0;
+    bool status_matches = strcmp(status, "all") == 0 ||
+                          strcmp(order->order_status, status) == 0;
+    return date_matches && type_matches && status_matches;
+}
+
+static void search_cached_orders(AdminMonitor *monitor, const char *date,
+                                 const char *type, const char *status)
+{
+    if (!valid_search_date(date) ||
+        (strcmp(type, "all") != 0 && strcmp(type, "매장") != 0 &&
+         strcmp(type, "포장") != 0) ||
+        (strcmp(status, "all") != 0 && strcmp(status, "접수") != 0 &&
+         strcmp(status, "조리중") != 0 && strcmp(status, "완료") != 0 &&
+         strcmp(status, "취소") != 0)) {
+        puts("검색값: 날짜 YYYY-MM-DD|all, 유형 매장|포장|all, 상태 접수|조리중|완료|취소|all");
+        return;
+    }
+    pthread_mutex_lock(&monitor->mutex);
+    if (!monitor->has_snapshot) {
+        puts("먼저 로그인하여 주문을 동기화하세요.");
+        pthread_mutex_unlock(&monitor->mutex);
+        return;
+    }
+    puts("ID | 주문번호 | 유형 | 결제 | 상태 | 금액 | 대기/표시 | 주문시각");
+    size_t displayed = 0;
+    for (size_t index = 0; index < monitor->order_count; ++index) {
+        if (search_matches(&monitor->orders[index], date, type, status)) {
+            print_order(&monitor->orders[index]);
+            ++displayed;
+        }
+    }
+    printf("검색된 주문: %zu건\n", displayed);
+    pthread_mutex_unlock(&monitor->mutex);
+}
+
 static bool update_and_refresh(AdminMonitor *monitor, unsigned int id,
                                const char *status)
 {
@@ -459,7 +514,7 @@ static bool cancel_and_refresh(AdminMonitor *monitor, unsigned int id)
     return success;
 }
 
-int main(void)
+int admin_run(void)
 {
     struct sigaction shutdown_action = {0};
     shutdown_action.sa_handler = handle_shutdown_signal;
@@ -538,6 +593,23 @@ int main(void)
             pthread_mutex_unlock(&monitor.mutex);
             continue;
         }
+        char sound_value[16];
+        if (sscanf(line, "sound %15s", sound_value) == 1) {
+            pthread_mutex_lock(&monitor.mutex);
+            if (strcmp(sound_value, "on") == 0) monitor.sound_enabled = true;
+            else if (strcmp(sound_value, "off") == 0) monitor.sound_enabled = false;
+            else if (strcmp(sound_value, "status") != 0) {
+                pthread_mutex_unlock(&monitor.mutex);
+                puts("sound on, sound off 또는 sound status를 사용하세요.");
+                continue;
+            }
+            bool enabled = monitor.sound_enabled;
+            pthread_mutex_unlock(&monitor.mutex);
+            printf("신규 주문 알림음: %s\n", enabled ? "켜짐" : "꺼짐");
+            admin_log(ADMIN_LOG_INFO, "신규 주문 알림음 %s",
+                      enabled ? "켜짐" : "꺼짐");
+            continue;
+        }
         size_t log_lines;
         if (sscanf(line, "log %zu", &log_lines) == 1 ||
             strcmp(line, "log") == 0) {
@@ -558,6 +630,13 @@ int main(void)
             (line[4] == '\0' || line[4] == ' ')) {
             const char *filter = line[4] == '\0' ? "active" : line + 5;
             print_cached_orders(&monitor, filter);
+            continue;
+        }
+        char search_date[16], search_type[16], search_status[24];
+        if (sscanf(line, "search %15s %15s %23s", search_date, search_type,
+                   search_status) == 3) {
+            search_cached_orders(&monitor, search_date, search_type,
+                                 search_status);
             continue;
         }
         const char *bulk_prefix = NULL;
