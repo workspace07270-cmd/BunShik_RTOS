@@ -2,3 +2,15 @@ add_executable(admin_scheduler_test admin_scheduler_test.c)
 target_link_libraries(admin_scheduler_test PRIVATE bunshik_admin_core)
 
 add_test(NAME admin_scheduler_test COMMAND admin_scheduler_test)
+
+add_executable(backend_parser_test backend_parser_test.c)
+target_link_libraries(backend_parser_test PRIVATE bunshik_admin_core)
+add_test(NAME backend_parser_test COMMAND backend_parser_test)
+
+add_executable(order_priority_test order_priority_test.c)
+target_link_libraries(order_priority_test PRIVATE bunshik_admin_core)
+add_test(NAME order_priority_test COMMAND order_priority_test)
+
+add_executable(admin_logger_test admin_logger_test.c)
+target_link_libraries(admin_logger_test PRIVATE bunshik_admin_core)
+add_test(NAME admin_logger_test COMMAND admin_logger_test)

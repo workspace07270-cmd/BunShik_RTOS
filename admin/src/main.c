@@ -1,9 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "backend_client.h"
+#include "admin_logger.h"
 #include "order_priority.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +17,17 @@
 #include <unistd.h>
 
 #define POLL_SECONDS 10
+#define MAX_BULK_IDS 32
+
+static volatile sig_atomic_t shutdown_requested;
+
+static void handle_shutdown_signal(int signal_number)
+{
+    (void)signal_number;
+    shutdown_requested = 1;
+    /* close()는 async-signal-safe이며, 입력 대기를 깨워 정상 정리 경로로 보낸다. */
+    close(STDIN_FILENO);
+}
 
 typedef struct {
     BackendClient *backend;
@@ -112,6 +127,7 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
             backend_logout(monitor->backend);
             monitor->authenticated = false;
             printf("\n[인증 만료] 다시 login 명령으로 로그인해 주세요.\nadmin> ");
+            admin_log(ADMIN_LOG_WARN, "JWT 인증 만료");
             fflush(stdout);
             return false;
         }
@@ -120,6 +136,7 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
         unsigned int delay = 1U << attempt;
         printf("\n[네트워크] 주문 조회 실패, %u초 후 재시도합니다.\nadmin> ",
                delay);
+        admin_log(ADMIN_LOG_WARN, "주문 조회 실패, %u초 후 재시도", delay);
         fflush(stdout);
         retry_pause(delay);
     }
@@ -130,6 +147,8 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
             fflush(stdout);
         }
         monitor->connection_failed = true;
+        admin_log(ADMIN_LOG_ERROR, "주문 동기화 실패: %s",
+                  backend_last_error(monitor->backend));
         return false;
     }
 
@@ -139,6 +158,9 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
                 !known_order(monitor, fresh[index].order_id)) {
                 printf("\n[신규 주문] ");
                 print_order(&fresh[index]);
+                admin_log(ADMIN_LOG_INFO, "신규 주문 감지: ID=%u 번호=%s 상태=%s",
+                          fresh[index].order_id, fresh[index].order_number,
+                          fresh[index].order_status);
                 printf("admin> ");
                 fflush(stdout);
             }
@@ -155,6 +177,11 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
                 printf("admin> ");
                 fflush(stdout);
                 mark_warned(monitor, fresh[index].order_id);
+                admin_log(ADMIN_LOG_WARN,
+                          "%s 주문 감지: ID=%u 번호=%s 대기=%ld분",
+                          order_urgency_name(urgency), fresh[index].order_id,
+                          fresh[index].order_number,
+                          order_wait_minutes(&fresh[index]));
             }
         }
     }
@@ -163,6 +190,7 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
     monitor->has_snapshot = true;
     if (monitor->connection_failed) {
         printf("\n[감시] 백엔드 연결이 복구됐습니다.\nadmin> ");
+        admin_log(ADMIN_LOG_INFO, "백엔드 연결 복구");
         fflush(stdout);
     }
     monitor->connection_failed = false;
@@ -172,6 +200,11 @@ static bool refresh_locked(AdminMonitor *monitor, bool announce_new,
 
 static void *monitor_main(void *context)
 {
+    sigset_t blocked_signals;
+    sigemptyset(&blocked_signals);
+    sigaddset(&blocked_signals, SIGINT);
+    sigaddset(&blocked_signals, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &blocked_signals, NULL);
     AdminMonitor *monitor = context;
     pthread_mutex_lock(&monitor->mutex);
     while (monitor->running) {
@@ -197,13 +230,15 @@ static void print_help(void)
     puts("  sync                         즉시 백엔드 동기화");
     puts("  list [active|received|cooking|delayed|completed|all]");
     puts("  detail <백엔드주문ID>        메뉴·옵션·세트 상세 조회");
-    puts("  next                         다음 처리 추천 주문");
-    puts("  start-next                   추천 주문 조리 시작");
     puts("  start <백엔드주문ID>         접수 -> 조리중");
     puts("  complete <백엔드주문ID>      조리중 -> 완료");
     puts("  cancel <백엔드주문ID>        주문 취소");
+    puts("  bulk-start <ID...>            여러 접수 주문 조리 시작");
+    puts("  bulk-complete <ID...>         여러 조리중 주문 완료");
+    puts("  bulk-cancel <ID...>           여러 주문 취소");
     puts("  server                       연결 대상 표시");
     puts("  connection                   연결·인증·동기화 상태");
+    puts("  log [줄수]                   오늘의 최근 로그 조회");
     puts("  help | quit");
 }
 
@@ -273,6 +308,64 @@ static bool confirm_change(const char *action, unsigned int id)
     return strcmp(answer, "yes") == 0;
 }
 
+static size_t parse_order_ids(char *text, unsigned int *ids, size_t capacity)
+{
+    size_t count = 0;
+    char *save = NULL;
+    for (char *token = strtok_r(text, " \t", &save); token != NULL;
+         token = strtok_r(NULL, " \t", &save)) {
+        if (count >= capacity) return 0;
+        char *end = NULL;
+        unsigned long value = strtoul(token, &end, 10);
+        if (end == token || *end != '\0' || value == 0 || value > UINT_MAX)
+            return 0;
+        for (size_t index = 0; index < count; ++index)
+            if (ids[index] == (unsigned int)value) return 0;
+        ids[count++] = (unsigned int)value;
+    }
+    return count;
+}
+
+static bool confirm_bulk_change(const char *action, const unsigned int *ids,
+                                size_t count)
+{
+    printf("실제 주문 %zu건(", count);
+    for (size_t index = 0; index < count; ++index)
+        printf("%s%u", index == 0 ? "" : ",", ids[index]);
+    printf(")을 %s할까요? (yes/no): ", action);
+    fflush(stdout);
+    char answer[16];
+    if (fgets(answer, sizeof(answer), stdin) == NULL) return false;
+    answer[strcspn(answer, "\n")] = '\0';
+    return strcmp(answer, "yes") == 0;
+}
+
+static bool bulk_and_refresh(AdminMonitor *monitor, const unsigned int *ids,
+                             size_t count, const char *status, bool cancel)
+{
+    pthread_mutex_lock(&monitor->mutex);
+    bool success = cancel
+        ? backend_cancel_bulk_orders(monitor->backend, ids, count)
+        : backend_update_bulk_status(monitor->backend, ids, count, status);
+    if (success) {
+        refresh_locked(monitor, false, 0);
+        admin_log(ADMIN_LOG_INFO, "다중 주문 처리 성공: 건수=%zu 작업=%s",
+                  count, cancel ? "취소" : status);
+    } else if (backend_error_kind(monitor->backend) == BACKEND_ERROR_AUTH) {
+        backend_logout(monitor->backend);
+        monitor->authenticated = false;
+        puts("[인증 만료] 다시 로그인해 주세요.");
+        admin_log(ADMIN_LOG_WARN, "다중 주문 처리 중 JWT 인증 만료");
+    } else {
+        printf("다중 주문 처리 실패: %s\n",
+               backend_last_error(monitor->backend));
+        admin_log(ADMIN_LOG_ERROR, "다중 주문 처리 실패: 건수=%zu 오류=%s",
+                  count, backend_last_error(monitor->backend));
+    }
+    pthread_mutex_unlock(&monitor->mutex);
+    return success;
+}
+
 static void print_cached_orders(AdminMonitor *monitor, const char *filter)
 {
     pthread_mutex_lock(&monitor->mutex);
@@ -287,60 +380,11 @@ static void print_cached_orders(AdminMonitor *monitor, const char *filter)
         if (matches_filter(&monitor->orders[index], filter))
             selected[displayed++] = &monitor->orders[index];
     }
-    for (size_t left = 0; left < displayed; ++left) {
-        for (size_t right = left + 1; right < displayed; ++right) {
-            OrderUrgency left_urgency = order_urgency(selected[left]);
-            OrderUrgency right_urgency = order_urgency(selected[right]);
-            long left_wait = order_wait_minutes(selected[left]);
-            long right_wait = order_wait_minutes(selected[right]);
-            if (right_urgency > left_urgency ||
-                (right_urgency == left_urgency && right_wait > left_wait)) {
-                const BackendOrder *temporary = selected[left];
-                selected[left] = selected[right];
-                selected[right] = temporary;
-            }
-    }
-    }
-    puts("ID | 주문번호 | 유형 | 결제 | 상태 | 금액 | 대기/우선순위 | 주문시각");
+    puts("ID | 주문번호 | 유형 | 결제 | 상태 | 금액 | 대기/표시 | 주문시각");
     for (size_t index = 0; index < displayed; ++index)
         print_order(selected[index]);
     printf("표시된 주문: %zu건\n", displayed);
     pthread_mutex_unlock(&monitor->mutex);
-}
-
-static bool get_next_order(AdminMonitor *monitor, BackendOrder *result)
-{
-    bool found = false;
-    pthread_mutex_lock(&monitor->mutex);
-    for (size_t index = 0; index < monitor->order_count; ++index) {
-        if (!found || order_should_precede(&monitor->orders[index], result)) {
-            if (strcmp(monitor->orders[index].order_status, "접수") == 0) {
-                *result = monitor->orders[index];
-                found = true;
-            }
-        }
-    }
-    pthread_mutex_unlock(&monitor->mutex);
-    return found;
-}
-
-static void show_recommended_order(AdminMonitor *monitor,
-                                   const BackendOrder *order)
-{
-    printf("\n다음 처리 추천 주문: %s (ID %u)\n", order->order_number,
-           order->order_id);
-    printf("대기시간: %ld분 | 우선순위: %s | 금액: %u원\n",
-           order_wait_minutes(order), order_urgency_name(order_urgency(order)),
-           order->total_price);
-
-    BackendOrderDetail detail;
-    pthread_mutex_lock(&monitor->mutex);
-    bool success = backend_fetch_order_detail(monitor->backend,
-                                               order->order_id, &detail);
-    if (!success)
-        printf("상세 조회 실패: %s\n", backend_last_error(monitor->backend));
-    pthread_mutex_unlock(&monitor->mutex);
-    if (success) print_detail(&detail);
 }
 
 static bool update_and_refresh(AdminMonitor *monitor, unsigned int id,
@@ -353,6 +397,7 @@ static bool update_and_refresh(AdminMonitor *monitor, unsigned int id,
         backend_logout(monitor->backend);
         monitor->authenticated = false;
         puts("[인증 만료] 다시 로그인해 주세요.");
+        admin_log(ADMIN_LOG_WARN, "상태 변경 중 JWT 인증 만료: 주문 ID=%u", id);
     } else if (backend_error_kind(monitor->backend) == BACKEND_ERROR_NETWORK) {
         puts("상태 변경 응답이 불확실하여 실제 주문 상태를 다시 확인합니다.");
         BackendOrderDetail detail;
@@ -366,8 +411,15 @@ static bool update_and_refresh(AdminMonitor *monitor, unsigned int id,
         if (success) {
             puts("백엔드에서 상태 변경이 반영된 것을 확인했습니다.");
             refresh_locked(monitor, false, 0);
+            admin_log(ADMIN_LOG_INFO, "주문 상태 재확인 성공: ID=%u 상태=%s",
+                      id, status);
         } else printf("상태 확인 실패: %s\n", backend_last_error(monitor->backend));
     } else printf("상태 변경 실패: %s\n", backend_last_error(monitor->backend));
+    if (success)
+        admin_log(ADMIN_LOG_INFO, "주문 상태 변경: ID=%u 상태=%s", id, status);
+    else
+        admin_log(ADMIN_LOG_ERROR, "주문 상태 변경 실패: ID=%u 오류=%s", id,
+                  backend_last_error(monitor->backend));
     pthread_mutex_unlock(&monitor->mutex);
     return success;
 }
@@ -382,6 +434,7 @@ static bool cancel_and_refresh(AdminMonitor *monitor, unsigned int id)
         backend_logout(monitor->backend);
         monitor->authenticated = false;
         puts("[인증 만료] 다시 로그인해 주세요.");
+        admin_log(ADMIN_LOG_WARN, "주문 취소 중 JWT 인증 만료: 주문 ID=%u", id);
     } else if (backend_error_kind(monitor->backend) == BACKEND_ERROR_NETWORK) {
         puts("취소 응답이 불확실하여 실제 주문 상태를 다시 확인합니다.");
         BackendOrderDetail detail;
@@ -395,15 +448,31 @@ static bool cancel_and_refresh(AdminMonitor *monitor, unsigned int id)
         if (success) {
             puts("백엔드에서 주문 취소가 반영된 것을 확인했습니다.");
             refresh_locked(monitor, false, 0);
+            admin_log(ADMIN_LOG_INFO, "주문 취소 재확인 성공: ID=%u", id);
         } else printf("취소 상태 확인 실패: %s\n",
                       backend_last_error(monitor->backend));
     } else printf("주문 취소 실패: %s\n", backend_last_error(monitor->backend));
+    if (success) admin_log(ADMIN_LOG_INFO, "주문 취소: ID=%u", id);
+    else admin_log(ADMIN_LOG_ERROR, "주문 취소 실패: ID=%u 오류=%s", id,
+                   backend_last_error(monitor->backend));
     pthread_mutex_unlock(&monitor->mutex);
     return success;
 }
 
 int main(void)
 {
+    struct sigaction shutdown_action = {0};
+    shutdown_action.sa_handler = handle_shutdown_signal;
+    sigemptyset(&shutdown_action.sa_mask);
+    sigaction(SIGINT, &shutdown_action, NULL);
+    sigaction(SIGTERM, &shutdown_action, NULL);
+
+    const char *log_directory = getenv("BUNSHIK_LOG_DIR");
+    if (!admin_logger_init(log_directory && log_directory[0]
+                               ? log_directory : "logs")) {
+        fputs("관리자 로그를 초기화하지 못했습니다.\n", stderr);
+        return EXIT_FAILURE;
+    }
     const char *configured_url = getenv("BUNSHIK_API_BASE_URL");
     AdminMonitor monitor = {0};
     monitor.backend = backend_client_create(
@@ -413,22 +482,34 @@ int main(void)
         pthread_cond_init(&monitor.wake, NULL)) {
         fputs("관리자 RTOS를 초기화하지 못했습니다.\n", stderr);
         backend_client_destroy(monitor.backend);
+        admin_logger_close();
         return EXIT_FAILURE;
     }
     monitor.running = true;
     if (pthread_create(&monitor.thread, NULL, monitor_main, &monitor) != 0) {
         fputs("주문 감시 태스크를 시작하지 못했습니다.\n", stderr);
         backend_client_destroy(monitor.backend);
+        admin_logger_close();
         return EXIT_FAILURE;
     }
 
     puts("BunShik 관리자 RTOS - Spring Boot 연동 모드");
     printf("백엔드: %s / 자동 동기화: %d초\n",
            backend_base_url(monitor.backend), POLL_SECONDS);
+    printf("로그: %s\n", admin_log_current_path());
+    admin_log(ADMIN_LOG_INFO, "관리자 RTOS 시작: 서버=%s",
+              backend_base_url(monitor.backend));
     print_help();
 
     char line[256];
-    while (printf("admin> "), fflush(stdout), fgets(line, sizeof(line), stdin)) {
+    while (!shutdown_requested) {
+        printf("admin> ");
+        fflush(stdout);
+        errno = 0;
+        if (fgets(line, sizeof(line), stdin) == NULL) {
+            if (shutdown_requested || errno == EINTR) break;
+            break;
+        }
         line[strcspn(line, "\n")] = '\0';
         if (line[0] == '\0') continue;
         if (strcmp(line, "quit") == 0) break;
@@ -457,6 +538,14 @@ int main(void)
             pthread_mutex_unlock(&monitor.mutex);
             continue;
         }
+        size_t log_lines;
+        if (sscanf(line, "log %zu", &log_lines) == 1 ||
+            strcmp(line, "log") == 0) {
+            if (strcmp(line, "log") == 0) log_lines = 20;
+            if (!admin_log_tail(log_lines))
+                puts("로그를 읽지 못했습니다. 줄수는 1~1000으로 입력하세요.");
+            continue;
+        }
         if (strcmp(line, "sync") == 0) {
             pthread_mutex_lock(&monitor.mutex);
             if (refresh_locked(&monitor, false, 3))
@@ -471,21 +560,38 @@ int main(void)
             print_cached_orders(&monitor, filter);
             continue;
         }
-        if (strcmp(line, "next") == 0 || strcmp(line, "start-next") == 0) {
-            BackendOrder next_order;
-            if (!get_next_order(&monitor, &next_order)) {
-                puts("현재 접수 상태의 주문이 없습니다.");
+        const char *bulk_prefix = NULL;
+        const char *bulk_status = NULL;
+        bool bulk_cancel = false;
+        if (strncmp(line, "bulk-start ", 11) == 0) {
+            bulk_prefix = line + 11;
+            bulk_status = "조리중";
+        } else if (strncmp(line, "bulk-complete ", 14) == 0) {
+            bulk_prefix = line + 14;
+            bulk_status = "완료";
+        } else if (strncmp(line, "bulk-cancel ", 12) == 0) {
+            bulk_prefix = line + 12;
+            bulk_cancel = true;
+        }
+        if (bulk_prefix != NULL) {
+            char id_text[256];
+            snprintf(id_text, sizeof(id_text), "%s", bulk_prefix);
+            unsigned int ids[MAX_BULK_IDS];
+            size_t id_count = parse_order_ids(id_text, ids, MAX_BULK_IDS);
+            if (id_count == 0) {
+                puts("주문 ID를 중복 없이 1~32개 입력하세요.");
                 continue;
             }
-            show_recommended_order(&monitor, &next_order);
-            if (strcmp(line, "start-next") == 0) {
-                if (!confirm_change("조리중으로 변경", next_order.order_id)) {
-                    puts("상태 변경을 취소했습니다.");
-                } else if (update_and_refresh(&monitor, next_order.order_id,
-                                              "조리중")) {
-                    puts("추천 주문의 조리를 시작했습니다.");
-                }
+            const char *action = bulk_cancel ? "취소" :
+                                 strcmp(bulk_status, "완료") == 0
+                                     ? "완료로 변경" : "조리중으로 변경";
+            if (!confirm_bulk_change(action, ids, id_count)) {
+                puts("다중 주문 처리를 취소했습니다.");
+                continue;
             }
+            if (bulk_and_refresh(&monitor, ids, id_count, bulk_status,
+                                 bulk_cancel))
+                puts("다중 주문 처리가 완료됐습니다.");
             continue;
         }
 
@@ -503,13 +609,19 @@ int main(void)
                 monitor.authenticated = true;
                 refresh_locked(&monitor, false, 2);
                 pthread_cond_signal(&monitor.wake);
+                admin_log(ADMIN_LOG_INFO, "관리자 로그인 성공: 사용자=%s",
+                          username);
             }
             pthread_mutex_unlock(&monitor.mutex);
             clear_secret(password, sizeof(password));
             if (success) {
                 puts("백엔드 관리자 로그인 성공");
                 print_cached_orders(&monitor, "active");
-            } else printf("로그인 실패: %s\n", backend_last_error(monitor.backend));
+            } else {
+                printf("로그인 실패: %s\n", backend_last_error(monitor.backend));
+                admin_log(ADMIN_LOG_WARN, "관리자 로그인 실패: 사용자=%s 오류=%s",
+                          username, backend_last_error(monitor.backend));
+            }
             continue;
         }
 
@@ -564,6 +676,9 @@ int main(void)
     pthread_cond_destroy(&monitor.wake);
     pthread_mutex_destroy(&monitor.mutex);
     backend_client_destroy(monitor.backend);
+    admin_log(ADMIN_LOG_INFO, "관리자 RTOS 종료%s",
+              shutdown_requested ? " (시그널)" : "");
+    admin_logger_close();
     puts("관리자 RTOS를 종료합니다.");
     return EXIT_SUCCESS;
 }

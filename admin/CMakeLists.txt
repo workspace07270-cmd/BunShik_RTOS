@@ -1,4 +1,5 @@
 add_library(bunshik_admin_core
+    src/admin_logger.c
     src/backend_client.c
     src/http_client.c
     src/order.c

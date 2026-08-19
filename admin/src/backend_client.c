@@ -443,6 +443,80 @@ bool backend_cancel_order(BackendClient *client, unsigned int order_id)
     return success;
 }
 
+static bool build_order_ids_json(const unsigned int *order_ids, size_t count,
+                                 const char *status, char *body,
+                                 size_t body_size)
+{
+    if (order_ids == NULL || count == 0 || body == NULL || body_size == 0)
+        return false;
+    size_t used = (size_t)snprintf(body, body_size, "{\"orderIds\":[");
+    if (used >= body_size) return false;
+    for (size_t index = 0; index < count; ++index) {
+        int written = snprintf(body + used, body_size - used, "%s%u",
+                               index == 0 ? "" : ",", order_ids[index]);
+        if (written < 0 || (size_t)written >= body_size - used) return false;
+        used += (size_t)written;
+    }
+    int written = status == NULL
+        ? snprintf(body + used, body_size - used, "]}")
+        : snprintf(body + used, body_size - used,
+                   "],\"orderStatus\":\"%s\"}", status);
+    return written >= 0 && (size_t)written < body_size - used;
+}
+
+bool backend_update_bulk_status(BackendClient *client,
+                                const unsigned int *order_ids, size_t count,
+                                const char *status)
+{
+    if (!backend_is_authenticated(client)) {
+        set_error(client, "먼저 login 명령으로 로그인하세요.");
+        client->error_kind = BACKEND_ERROR_AUTH;
+        return false;
+    }
+    char body[2048];
+    if (!build_order_ids_json(order_ids, count, status, body, sizeof(body))) {
+        set_error(client, "다중 주문 요청 생성에 실패했습니다.");
+        client->error_kind = BACKEND_ERROR_PARSE;
+        return false;
+    }
+    HttpResponse response;
+    if (http_request(client->base_url, "PATCH", "/api/admin/orders/bulk/status",
+                     client->token, body, &response, client->error,
+                     sizeof(client->error)) != 0)
+        return request_failed(client);
+    bool success = response.status_code >= 200 && response.status_code < 300;
+    if (!success) response_error(client, &response);
+    else clear_error(client);
+    http_response_free(&response);
+    return success;
+}
+
+bool backend_cancel_bulk_orders(BackendClient *client,
+                                const unsigned int *order_ids, size_t count)
+{
+    if (!backend_is_authenticated(client)) {
+        set_error(client, "먼저 login 명령으로 로그인하세요.");
+        client->error_kind = BACKEND_ERROR_AUTH;
+        return false;
+    }
+    char body[2048];
+    if (!build_order_ids_json(order_ids, count, NULL, body, sizeof(body))) {
+        set_error(client, "다중 취소 요청 생성에 실패했습니다.");
+        client->error_kind = BACKEND_ERROR_PARSE;
+        return false;
+    }
+    HttpResponse response;
+    if (http_request(client->base_url, "PATCH", "/api/admin/orders/bulk/cancel",
+                     client->token, body, &response, client->error,
+                     sizeof(client->error)) != 0)
+        return request_failed(client);
+    bool success = response.status_code >= 200 && response.status_code < 300;
+    if (!success) response_error(client, &response);
+    else clear_error(client);
+    http_response_free(&response);
+    return success;
+}
+
 bool backend_is_authenticated(const BackendClient *client)
 {
     return client != NULL && client->token[0] != '\0';

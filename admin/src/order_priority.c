@@ -5,7 +5,6 @@
 #include <string.h>
 
 #define DELAY_MINUTES 10L
-#define URGENT_MINUTES 20L
 
 long order_wait_minutes_at(const BackendOrder *order, time_t now)
 {
@@ -30,7 +29,6 @@ long order_wait_minutes(const BackendOrder *order)
 OrderUrgency order_urgency_at(const BackendOrder *order, time_t now)
 {
     long minutes = order_wait_minutes_at(order, now);
-    if (minutes >= URGENT_MINUTES) return ORDER_URGENCY_URGENT;
     if (minutes >= DELAY_MINUTES) return ORDER_URGENCY_DELAYED;
     return ORDER_URGENCY_NORMAL;
 }
@@ -43,31 +41,7 @@ OrderUrgency order_urgency(const BackendOrder *order)
 const char *order_urgency_name(OrderUrgency urgency)
 {
     switch (urgency) {
-    case ORDER_URGENCY_URGENT: return "긴급";
     case ORDER_URGENCY_DELAYED: return "지연";
     default: return "정상";
     }
-}
-
-bool order_should_precede_at(const BackendOrder *candidate,
-                             const BackendOrder *current, time_t now)
-{
-    if (candidate == NULL || strcmp(candidate->order_status, "접수") != 0)
-        return false;
-    if (current == NULL || strcmp(current->order_status, "접수") != 0)
-        return true;
-    OrderUrgency candidate_urgency = order_urgency_at(candidate, now);
-    OrderUrgency current_urgency = order_urgency_at(current, now);
-    if (candidate_urgency != current_urgency)
-        return candidate_urgency > current_urgency;
-    long candidate_wait = order_wait_minutes_at(candidate, now);
-    long current_wait = order_wait_minutes_at(current, now);
-    if (candidate_wait != current_wait) return candidate_wait > current_wait;
-    return candidate->order_id < current->order_id;
-}
-
-bool order_should_precede(const BackendOrder *candidate,
-                          const BackendOrder *current)
-{
-    return order_should_precede_at(candidate, current, time(NULL));
 }

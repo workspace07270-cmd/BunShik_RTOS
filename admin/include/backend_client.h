@@ -69,6 +69,11 @@ bool backend_fetch_order_detail(BackendClient *client, unsigned int order_id,
 bool backend_update_status(BackendClient *client, unsigned int order_id,
                            const char *status);
 bool backend_cancel_order(BackendClient *client, unsigned int order_id);
+bool backend_update_bulk_status(BackendClient *client,
+                                const unsigned int *order_ids, size_t count,
+                                const char *status);
+bool backend_cancel_bulk_orders(BackendClient *client,
+                                const unsigned int *order_ids, size_t count);
 bool backend_is_authenticated(const BackendClient *client);
 void backend_logout(BackendClient *client);
 const char *backend_base_url(const BackendClient *client);
