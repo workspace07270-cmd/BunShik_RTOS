@@ -2,6 +2,7 @@ add_library(bunshik_admin_core
     src/backend_client.c
     src/http_client.c
     src/order.c
+    src/order_priority.c
     src/scheduler.c
 )
 

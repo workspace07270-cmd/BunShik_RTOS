@@ -11,6 +11,9 @@ C와 POSIX thread로 모델링합니다.
 - 실제 주문 상태 변경과 취소
 - 10초 주기의 백엔드 주문 감시 태스크와 신규 주문 알림
 - 활성·접수·조리중·완료·전체 주문 필터
+- 접수 후 10분 지연 및 20분 긴급 주문 감지
+- 실제 접수 주문의 다음 처리 추천 및 조리 시작
+- 네트워크 지수 재시도, JWT 만료 감지 및 변경 상태 재확인
 - 관리자가 `접수 -> 조리중 -> 완료` 상태를 직접 변경
 - 접수·조리 중 주문 취소와 잘못된 상태 전이 차단
 - 우선순위 주문 큐 (같은 우선순위는 FIFO)
@@ -37,10 +40,11 @@ BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/admin/bunshik_admin
 CLI에서 `help`를 입력하면 명령 목록을 볼 수 있습니다.
 
 ```text
-login 관리자아이디 관리자비밀번호
+login 관리자아이디
 sync
 list active
 list received
+detail 260
 start 1
 complete 1
 cancel 2

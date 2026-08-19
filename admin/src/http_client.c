@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <netdb.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,8 +36,14 @@ static int parse_url(const char *url, ParsedUrl *parsed)
     if (host_length == 0 || host_length >= sizeof(parsed->host)) return -1;
     memcpy(parsed->host, start, host_length);
     parsed->host[host_length] = '\0';
-    snprintf(parsed->port, sizeof(parsed->port), "%s",
-             colon == NULL ? "80" : colon + 1);
+    if (colon == NULL) {
+        snprintf(parsed->port, sizeof(parsed->port), "80");
+    } else {
+        size_t port_length = (size_t)(end - colon - 1);
+        if (port_length == 0 || port_length >= sizeof(parsed->port)) return -1;
+        memcpy(parsed->port, colon + 1, port_length);
+        parsed->port[port_length] = '\0';
+    }
     if (path == NULL) parsed->prefix[0] = '\0';
     else snprintf(parsed->prefix, sizeof(parsed->prefix), "%s", path);
     return 0;
@@ -59,6 +66,38 @@ void http_response_free(HttpResponse *response)
     free(response->body);
     response->body = NULL;
     response->status_code = 0;
+}
+
+static char *decode_chunked(const char *input, size_t input_length,
+                            size_t *output_length)
+{
+    char *output = malloc(input_length + 1U);
+    if (output == NULL) return NULL;
+    const char *cursor = input;
+    const char *limit = input + input_length;
+    size_t used = 0;
+    while (cursor < limit) {
+        char *size_end = NULL;
+        unsigned long chunk_size = strtoul(cursor, &size_end, 16);
+        if (size_end == cursor || size_end + 2 > limit ||
+            size_end[0] != '\r' || size_end[1] != '\n') {
+            free(output);
+            return NULL;
+        }
+        cursor = size_end + 2;
+        if (chunk_size == 0) break;
+        if ((size_t)(limit - cursor) < chunk_size + 2U ||
+            cursor[chunk_size] != '\r' || cursor[chunk_size + 1] != '\n') {
+            free(output);
+            return NULL;
+        }
+        memcpy(output + used, cursor, chunk_size);
+        used += chunk_size;
+        cursor += chunk_size + 2U;
+    }
+    output[used] = '\0';
+    *output_length = used;
+    return output;
 }
 
 int http_request(const char *base_url, const char *method, const char *path,
@@ -147,6 +186,16 @@ int http_request(const char *base_url, const char *method, const char *path,
         }
         used += (size_t)received;
     }
+    if (used == HTTP_MAX_RESPONSE) {
+        char extra;
+        ssize_t more = recv(socket_fd, &extra, 1, 0);
+        if (more > 0) {
+            free(raw);
+            close(socket_fd);
+            snprintf(error, error_size, "HTTP 응답이 최대 크기 1MB를 초과했습니다.");
+            return -1;
+        }
+    }
     close(socket_fd);
     raw[used] = '\0';
 
@@ -156,16 +205,24 @@ int http_request(const char *base_url, const char *method, const char *path,
         snprintf(error, error_size, "올바르지 않은 HTTP 응답");
         return -1;
     }
+    bool chunked = strstr(raw, "Transfer-Encoding: chunked") != NULL ||
+                   strstr(raw, "transfer-encoding: chunked") != NULL;
     char *body_start = headers_end + 4;
     size_t body_length = used - (size_t)(body_start - raw);
-    response->body = malloc(body_length + 1U);
+    if (chunked) {
+        response->body = decode_chunked(body_start, body_length, &body_length);
+    } else {
+        response->body = malloc(body_length + 1U);
+        if (response->body != NULL) {
+            memcpy(response->body, body_start, body_length);
+            response->body[body_length] = '\0';
+        }
+    }
     if (response->body == NULL) {
         free(raw);
-        snprintf(error, error_size, "응답 본문 메모리 할당 실패");
+        snprintf(error, error_size, "HTTP 응답 본문을 해석하지 못했습니다.");
         return -1;
     }
-    memcpy(response->body, body_start, body_length);
-    response->body[body_length] = '\0';
     free(raw);
     return 0;
 }
