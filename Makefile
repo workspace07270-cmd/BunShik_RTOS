@@ -1,7 +1,10 @@
 SHELL := /bin/bash
 
 BUILD_DIR ?= build
-BUNSHIK_API_BASE_URL ?= http://172.23.0.1:8080
+WSL_GATEWAY_IP := $(shell ip route show default 2>/dev/null | awk 'NR == 1 { print $$3 }')
+WSL_DNS_IP := $(shell awk '/^nameserver / { print $$2; exit }' /etc/resolv.conf 2>/dev/null)
+WSL_HOST_IP := $(if $(WSL_GATEWAY_IP),$(WSL_GATEWAY_IP),$(WSL_DNS_IP))
+BUNSHIK_API_BASE_URL ?= http://$(if $(WSL_HOST_IP),$(WSL_HOST_IP),127.0.0.1):8080
 
 .PHONY: setup configure build run test clean
 
@@ -14,6 +17,14 @@ setup:
 	echo "관리자 자동 로그인 설정을 저장했습니다."
 
 configure:
+	@if [[ -f "$(BUILD_DIR)/CMakeCache.txt" ]]; then \
+		cached_source="$$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' \
+			"$(BUILD_DIR)/CMakeCache.txt" | head -n 1)"; \
+		if [[ -n "$$cached_source" && "$$cached_source" != "$(CURDIR)" ]]; then \
+			echo "소스 위치가 변경되어 $(BUILD_DIR) 생성물을 새로 구성합니다."; \
+			cmake -E remove_directory "$(BUILD_DIR)"; \
+		fi; \
+	fi
 	cmake -S . -B $(BUILD_DIR) \
 		-DBUNSHIK_API_BASE_URL=$(BUNSHIK_API_BASE_URL)
 

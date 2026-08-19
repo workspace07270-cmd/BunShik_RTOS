@@ -39,6 +39,13 @@ BUNSHIK_ADMIN_PASSWORD=관리자비밀번호 \
 make run BUNSHIK_API_BASE_URL=http://서버주소:8080
 ```
 
+기본 실행은 WSL의 현재 Windows 호스트 주소를 자동으로 찾아 8080 포트에
+연결합니다. 백엔드가 같은 PC가 아닌 별도 서버에 있을 때만 주소를 지정하면
+됩니다.
+
+프로젝트를 다른 폴더나 다른 컴퓨터로 복사했을 때 기존 `build/`의 CMake
+경로가 달라도 `make run`이 이를 감지하고 build 생성물만 자동 재구성합니다.
+
 ```bash
 cmake -S . -B build
 cmake --build build
