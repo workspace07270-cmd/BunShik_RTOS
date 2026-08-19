@@ -1,146 +1,268 @@
-#include "scheduler.h"
+#define _POSIX_C_SOURCE 200809L
 
-#include <ctype.h>
+#include "backend_client.h"
+
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#define POLL_SECONDS 10
+
+typedef struct {
+    BackendClient *backend;
+    pthread_mutex_t mutex;
+    pthread_cond_t wake;
+    pthread_t thread;
+    BackendOrder orders[BACKEND_MAX_ORDERS];
+    size_t order_count;
+    bool running;
+    bool authenticated;
+    bool has_snapshot;
+    bool connection_failed;
+} AdminMonitor;
+
+static bool is_active(const BackendOrder *order)
+{
+    return strcmp(order->order_status, "접수") == 0 ||
+           strcmp(order->order_status, "조리중") == 0;
+}
+
+static bool matches_filter(const BackendOrder *order, const char *filter)
+{
+    if (filter == NULL || filter[0] == '\0' || strcmp(filter, "active") == 0)
+        return is_active(order);
+    if (strcmp(filter, "all") == 0) return true;
+    if (strcmp(filter, "received") == 0)
+        return strcmp(order->order_status, "접수") == 0;
+    if (strcmp(filter, "cooking") == 0)
+        return strcmp(order->order_status, "조리중") == 0;
+    if (strcmp(filter, "completed") == 0)
+        return strcmp(order->order_status, "완료") == 0;
+    return false;
+}
+
+static bool known_order(const AdminMonitor *monitor, unsigned int order_id)
+{
+    for (size_t index = 0; index < monitor->order_count; ++index) {
+        if (monitor->orders[index].order_id == order_id) return true;
+    }
+    return false;
+}
+
+static void print_order(const BackendOrder *order)
+{
+    printf("%u | %s | %s | %s | %s | %u원 | %s\n",
+           order->order_id, order->order_number, order->order_type,
+           order->payment_method[0] ? order->payment_method : "미확인",
+           order->order_status, order->total_price, order->created_at);
+}
+
+/* 호출 시 monitor->mutex를 보유해야 한다. */
+static bool refresh_locked(AdminMonitor *monitor, bool announce_new)
+{
+    BackendOrder fresh[BACKEND_MAX_ORDERS];
+    size_t fresh_count = 0;
+    if (!backend_fetch_orders(monitor->backend, fresh, BACKEND_MAX_ORDERS,
+                              &fresh_count)) {
+        if (!monitor->connection_failed) {
+            printf("\n[감시] 주문 동기화 실패: %s\nadmin> ",
+                   backend_last_error(monitor->backend));
+            fflush(stdout);
+        }
+        monitor->connection_failed = true;
+        return false;
+    }
+
+    if (announce_new && monitor->has_snapshot) {
+        for (size_t index = 0; index < fresh_count; ++index) {
+            if (is_active(&fresh[index]) &&
+                !known_order(monitor, fresh[index].order_id)) {
+                printf("\n[신규 주문] ");
+                print_order(&fresh[index]);
+                printf("admin> ");
+                fflush(stdout);
+            }
+        }
+    }
+    memcpy(monitor->orders, fresh, fresh_count * sizeof(*fresh));
+    monitor->order_count = fresh_count;
+    monitor->has_snapshot = true;
+    if (monitor->connection_failed) {
+        printf("\n[감시] 백엔드 연결이 복구됐습니다.\nadmin> ");
+        fflush(stdout);
+    }
+    monitor->connection_failed = false;
+    return true;
+}
+
+static void *monitor_main(void *context)
+{
+    AdminMonitor *monitor = context;
+    pthread_mutex_lock(&monitor->mutex);
+    while (monitor->running) {
+        while (monitor->running && !monitor->authenticated)
+            pthread_cond_wait(&monitor->wake, &monitor->mutex);
+        if (!monitor->running) break;
+
+        struct timespec deadline;
+        timespec_get(&deadline, TIME_UTC);
+        deadline.tv_sec += POLL_SECONDS;
+        pthread_cond_timedwait(&monitor->wake, &monitor->mutex, &deadline);
+        if (monitor->running && monitor->authenticated)
+            refresh_locked(monitor, true);
+    }
+    pthread_mutex_unlock(&monitor->mutex);
+    return NULL;
+}
 
 static void print_help(void)
 {
     puts("명령:");
-    puts("  receive <주문번호> <우선순위> <예상조리ms> <메뉴명>");
-    puts("  start <내부ID>");
-    puts("  complete <내부ID>");
-    puts("  cancel <내부ID>");
-    puts("  detail <내부ID>");
-    puts("  list [all|received|cooking|completed|canceled]");
-    puts("  help");
-    puts("  quit");
+    puts("  login <아이디> <비밀번호>");
+    puts("  sync                         즉시 백엔드 동기화");
+    puts("  list [active|received|cooking|completed|all]");
+    puts("  start <백엔드주문ID>         접수 -> 조리중");
+    puts("  complete <백엔드주문ID>      조리중 -> 완료");
+    puts("  cancel <백엔드주문ID>        주문 취소");
+    puts("  server                       연결 대상 표시");
+    puts("  help | quit");
 }
 
-static bool status_matches(OrderStatus status, const char *filter)
+static void print_cached_orders(AdminMonitor *monitor, const char *filter)
 {
-    if (filter == NULL || filter[0] == '\0' || strcmp(filter, "all") == 0) {
-        return true;
+    pthread_mutex_lock(&monitor->mutex);
+    if (!monitor->has_snapshot) {
+        puts("아직 주문을 동기화하지 않았습니다. login 또는 sync를 실행하세요.");
+        pthread_mutex_unlock(&monitor->mutex);
+        return;
     }
-    return (strcmp(filter, "received") == 0 && status == ORDER_RECEIVED) ||
-           (strcmp(filter, "cooking") == 0 && status == ORDER_COOKING) ||
-           (strcmp(filter, "completed") == 0 && status == ORDER_COMPLETED) ||
-           (strcmp(filter, "canceled") == 0 && status == ORDER_CANCELED);
-}
-
-static void print_order(const Order *order)
-{
-    printf("%u | %s | %d | %s | %u ms | %s\n", order->id,
-           order->order_number, order->priority,
-           order_status_name(order->status), order->cook_time_ms, order->menu);
-}
-
-static void print_orders(Scheduler *scheduler, const char *filter)
-{
-    Order orders[SCHEDULER_MAX_ORDERS];
-    size_t count = scheduler_snapshot(scheduler, orders, SCHEDULER_MAX_ORDERS);
+    puts("ID | 주문번호 | 유형 | 결제 | 상태 | 금액 | 주문시각");
     size_t displayed = 0;
-
-    puts("ID | 주문번호 | 우선순위 | 상태 | 예상시간 | 메뉴");
-    for (size_t index = 0; index < count; ++index) {
-        if (status_matches(orders[index].status, filter)) {
-            print_order(&orders[index]);
+    for (size_t index = 0; index < monitor->order_count; ++index) {
+        if (matches_filter(&monitor->orders[index], filter)) {
+            print_order(&monitor->orders[index]);
             ++displayed;
         }
     }
-    if (displayed == 0) puts("조건에 맞는 주문이 없습니다.");
+    printf("표시된 주문: %zu건\n", displayed);
+    pthread_mutex_unlock(&monitor->mutex);
 }
 
-static void print_detail(Scheduler *scheduler, unsigned int id)
+static bool update_and_refresh(AdminMonitor *monitor, unsigned int id,
+                               const char *status)
 {
-    Order order;
-    if (!scheduler_get_order(scheduler, id, &order)) {
-        puts("주문을 찾을 수 없습니다.");
-        return;
-    }
-    printf("내부 ID: %u\n주문번호: %s\n메뉴: %s\n", order.id,
-           order.order_number, order.menu);
-    printf("우선순위: %d\n예상 조리시간: %u ms\n현재 상태: %s\n",
-           order.priority, order.cook_time_ms,
-           order_status_name(order.status));
-}
-
-static char *skip_spaces(char *text)
-{
-    while (*text != '\0' && isspace((unsigned char)*text)) ++text;
-    return text;
+    pthread_mutex_lock(&monitor->mutex);
+    bool success = backend_update_status(monitor->backend, id, status);
+    if (success) refresh_locked(monitor, false);
+    else printf("상태 변경 실패: %s\n", backend_last_error(monitor->backend));
+    pthread_mutex_unlock(&monitor->mutex);
+    return success;
 }
 
 int main(void)
 {
-    Scheduler *scheduler = scheduler_create();
-    if (scheduler == NULL) {
-        fputs("주문 관리자를 초기화하지 못했습니다.\n", stderr);
+    const char *configured_url = getenv("BUNSHIK_API_BASE_URL");
+    AdminMonitor monitor = {0};
+    monitor.backend = backend_client_create(
+        configured_url && configured_url[0] ? configured_url
+                                             : "http://127.0.0.1:8080");
+    if (monitor.backend == NULL || pthread_mutex_init(&monitor.mutex, NULL) ||
+        pthread_cond_init(&monitor.wake, NULL)) {
+        fputs("관리자 RTOS를 초기화하지 못했습니다.\n", stderr);
+        backend_client_destroy(monitor.backend);
+        return EXIT_FAILURE;
+    }
+    monitor.running = true;
+    if (pthread_create(&monitor.thread, NULL, monitor_main, &monitor) != 0) {
+        fputs("주문 감시 태스크를 시작하지 못했습니다.\n", stderr);
+        backend_client_destroy(monitor.backend);
         return EXIT_FAILURE;
     }
 
-    puts("BunShik 관리자 RTOS 시뮬레이터");
-    puts("주문 상태는 관리자의 명령으로 변경됩니다.");
+    puts("BunShik 관리자 RTOS - Spring Boot 연동 모드");
+    printf("백엔드: %s / 자동 동기화: %d초\n",
+           backend_base_url(monitor.backend), POLL_SECONDS);
     print_help();
 
     char line[256];
     while (printf("admin> "), fflush(stdout), fgets(line, sizeof(line), stdin)) {
         line[strcspn(line, "\n")] = '\0';
+        if (line[0] == '\0') continue;
         if (strcmp(line, "quit") == 0) break;
-        if (strcmp(line, "help") == 0) {
-            print_help();
+        if (strcmp(line, "help") == 0) { print_help(); continue; }
+        if (strcmp(line, "server") == 0) {
+            pthread_mutex_lock(&monitor.mutex);
+            printf("%s (%s)\n", backend_base_url(monitor.backend),
+                   monitor.authenticated ? "로그인됨" : "로그인 필요");
+            pthread_mutex_unlock(&monitor.mutex);
+            continue;
+        }
+        if (strcmp(line, "sync") == 0) {
+            pthread_mutex_lock(&monitor.mutex);
+            if (refresh_locked(&monitor, false))
+                printf("백엔드 주문 %zu건을 동기화했습니다.\n", monitor.order_count);
+            pthread_mutex_unlock(&monitor.mutex);
+            print_cached_orders(&monitor, "active");
             continue;
         }
         if (strncmp(line, "list", 4) == 0 &&
-            (line[4] == '\0' || isspace((unsigned char)line[4]))) {
-            print_orders(scheduler, skip_spaces(line + 4));
+            (line[4] == '\0' || line[4] == ' ')) {
+            const char *filter = line[4] == '\0' ? "active" : line + 5;
+            print_cached_orders(&monitor, filter);
+            continue;
+        }
+
+        char username[64], password[128];
+        if (sscanf(line, "login %63s %127s", username, password) == 2) {
+            pthread_mutex_lock(&monitor.mutex);
+            bool success = backend_login(monitor.backend, username, password);
+            if (success) {
+                monitor.authenticated = true;
+                refresh_locked(&monitor, false);
+                pthread_cond_signal(&monitor.wake);
+            }
+            pthread_mutex_unlock(&monitor.mutex);
+            if (success) {
+                puts("백엔드 관리자 로그인 성공");
+                print_cached_orders(&monitor, "active");
+            } else printf("로그인 실패: %s\n", backend_last_error(monitor.backend));
             continue;
         }
 
         unsigned int id;
-        if (sscanf(line, "detail %u", &id) == 1) {
-            print_detail(scheduler, id);
-            continue;
-        }
         if (sscanf(line, "start %u", &id) == 1) {
-            puts(scheduler_start_order(scheduler, id)
-                     ? "조리를 시작했습니다."
-                     : "접수 상태의 주문만 조리를 시작할 수 있습니다.");
+            if (update_and_refresh(&monitor, id, "조리중"))
+                puts("백엔드 주문을 조리중으로 변경했습니다.");
             continue;
         }
         if (sscanf(line, "complete %u", &id) == 1) {
-            puts(scheduler_complete_order(scheduler, id)
-                     ? "조리를 완료했습니다."
-                     : "조리 중인 주문만 완료할 수 있습니다.");
+            if (update_and_refresh(&monitor, id, "완료"))
+                puts("백엔드 주문을 완료로 변경했습니다.");
             continue;
         }
         if (sscanf(line, "cancel %u", &id) == 1) {
-            puts(scheduler_cancel(scheduler, id)
-                     ? "주문을 취소했습니다."
-                     : "접수 또는 조리 중인 주문만 취소할 수 있습니다.");
-            continue;
-        }
-
-        char order_number[ORDER_NUMBER_LENGTH];
-        char menu[ORDER_MENU_LENGTH];
-        int priority;
-        unsigned int cook_time_ms;
-        if (sscanf(line, "receive %31s %d %u %95[^\n]", order_number,
-                   &priority, &cook_time_ms, menu) == 4) {
-            int new_id = scheduler_submit(scheduler, order_number, menu,
-                                          priority, cook_time_ms);
-            if (new_id < 0) {
-                puts("주문 형식이 잘못됐거나 저장 공간이 가득 찼습니다.");
-            } else {
-                printf("주문을 접수했습니다. 내부 ID=%d\n", new_id);
-            }
+            pthread_mutex_lock(&monitor.mutex);
+            bool success = backend_cancel_order(monitor.backend, id);
+            if (success) refresh_locked(&monitor, false);
+            else printf("주문 취소 실패: %s\n", backend_last_error(monitor.backend));
+            pthread_mutex_unlock(&monitor.mutex);
+            if (success) puts("백엔드 주문을 취소했습니다.");
             continue;
         }
         puts("알 수 없는 명령입니다. help를 입력하세요.");
     }
 
-    scheduler_destroy(scheduler);
-    puts("관리자 시뮬레이터를 종료합니다.");
+    pthread_mutex_lock(&monitor.mutex);
+    monitor.running = false;
+    pthread_cond_signal(&monitor.wake);
+    pthread_mutex_unlock(&monitor.mutex);
+    pthread_join(monitor.thread, NULL);
+    pthread_cond_destroy(&monitor.wake);
+    pthread_mutex_destroy(&monitor.mutex);
+    backend_client_destroy(monitor.backend);
+    puts("관리자 RTOS를 종료합니다.");
     return EXIT_SUCCESS;
 }
