@@ -3,6 +3,7 @@
 #include "http_client.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -10,9 +11,12 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define HTTP_MAX_RESPONSE (1024U * 1024U)
+#define CONNECT_RETRY_MS 50
+#define CONNECT_TIMEOUT_MS 3000
 
 typedef struct {
     char host[256];
@@ -58,6 +62,48 @@ static int send_all(int socket_fd, const char *data, size_t length)
         sent += (size_t)result;
     }
     return 0;
+}
+
+static int connect_with_rtos_timeout(int socket_fd,
+        const struct sockaddr *address, socklen_t address_length)
+{
+    int flags = fcntl(socket_fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return -1;
+
+    int result = connect(socket_fd, address, address_length);
+    if (result < 0 && errno != EINPROGRESS && errno != EALREADY
+            && errno != EINTR) return -1;
+
+    for (unsigned int elapsed = 0; result < 0 && elapsed < CONNECT_TIMEOUT_MS;
+            elapsed += CONNECT_RETRY_MS) {
+        int socket_error = 0;
+        socklen_t error_length = sizeof(socket_error);
+        if (getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                &error_length) < 0) return -1;
+        if (socket_error == 0) {
+            struct sockaddr_storage peer;
+            socklen_t peer_length = sizeof(peer);
+            if (getpeername(socket_fd, (struct sockaddr *)&peer,
+                    &peer_length) == 0) {
+                result = 0;
+                break;
+            }
+        } else if (socket_error != EINPROGRESS && socket_error != EALREADY) {
+            errno = socket_error;
+            return -1;
+        }
+        struct timespec pause = {
+            .tv_sec = 0,
+            .tv_nsec = CONNECT_RETRY_MS * 1000000L
+        };
+        while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
+    }
+    if (result < 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    return fcntl(socket_fd, F_SETFL, flags);
 }
 
 void http_response_free(HttpResponse *response)
@@ -129,12 +175,9 @@ int http_request(const char *base_url, const char *method, const char *path,
         struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
         setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-        int connected;
-        do {
-            connected = connect(socket_fd, address->ai_addr,
-                                address->ai_addrlen);
-        } while (connected < 0 && errno == EINTR);
-        if (connected == 0 || (connected < 0 && errno == EISCONN)) break;
+        int connected = connect_with_rtos_timeout(socket_fd, address->ai_addr,
+                address->ai_addrlen);
+        if (connected == 0) break;
         close(socket_fd);
         socket_fd = -1;
     }

@@ -3,16 +3,59 @@
 #include "customer_http_client.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define REQUEST_CAPACITY 1024
 #define RAW_RESPONSE_CAPACITY 65536
+#define CONNECT_RETRY_MS 50
+#define CONNECT_TIMEOUT_MS 3000
+
+static int connect_with_rtos_timeout(int fd, const struct sockaddr *address,
+        socklen_t address_length) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -1;
+
+    int result = connect(fd, address, address_length);
+    if (result < 0 && errno != EINPROGRESS && errno != EALREADY
+            && errno != EINTR) return -1;
+
+    for (unsigned int elapsed = 0; result < 0 && elapsed < CONNECT_TIMEOUT_MS;
+            elapsed += CONNECT_RETRY_MS) {
+        int socket_error = 0;
+        socklen_t error_length = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                &error_length) < 0) return -1;
+        if (socket_error == 0) {
+            struct sockaddr_storage peer;
+            socklen_t peer_length = sizeof(peer);
+            if (getpeername(fd, (struct sockaddr *)&peer, &peer_length) == 0) {
+                result = 0;
+                break;
+            }
+        } else if (socket_error != EINPROGRESS && socket_error != EALREADY) {
+            errno = socket_error;
+            return -1;
+        }
+        struct timespec pause = {
+            .tv_sec = 0,
+            .tv_nsec = CONNECT_RETRY_MS * 1000000L
+        };
+        while (nanosleep(&pause, &pause) < 0 && errno == EINTR) {}
+    }
+    if (result < 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    return fcntl(fd, F_SETFL, flags);
+}
 
 /*
  * "http://localhost:8080" 같은 주소를 host="localhost", port=8080으로 나눕니다.
@@ -64,15 +107,13 @@ static int connect_server(const http_server_t *server) {
         fd = socket(address->ai_family, address->ai_socktype,
                 address->ai_protocol);
         if (fd < 0) continue;
-        /* 서버가 응답하지 않을 때 영원히 멈추지 않도록 5초 제한을 둡니다. */
+        /* 송수신은 5초, TCP 연결 수립은 위 함수에서 3초로 제한합니다. */
         struct timeval timeout = {.tv_sec = 5, .tv_usec = 0};
         (void) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         (void) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-        int connected;
-        do {
-            connected = connect(fd, address->ai_addr, address->ai_addrlen);
-        } while (connected < 0 && errno == EINTR);
-        if (connected == 0 || (connected < 0 && errno == EISCONN)) break;
+        int connected = connect_with_rtos_timeout(fd, address->ai_addr,
+                address->ai_addrlen);
+        if (connected == 0) break;
         close(fd);
         fd = -1;
     }
