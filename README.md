@@ -21,6 +21,9 @@ WSL Ubuntu에서 FreeRTOS POSIX 포트로 실행되는 분식집 주문 처리 R
 - FreeRTOS 관리자 CLI Task와 주문 감시 Task
 - FreeRTOS 고객 연결·출력 감시·인쇄 Worker Task
 - FreeRTOS Mutex, Binary Semaphore와 Task Notification 기반 동기화
+- 완료 신호 장애 시 실제 인쇄를 반복하지 않고 완료 요청만 지수 재시도
+- 관리자 메뉴·옵션의 등록·이름·가격·판매 상태 변경 자동 감지 및 기록
+- 접수 후 10분이 지난 지연 주문을 한 번만 알림음과 로그로 경고
 
 ## 빌드와 실행
 

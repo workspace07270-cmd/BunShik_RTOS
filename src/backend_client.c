@@ -70,6 +70,26 @@ static bool json_unsigned(const char *json, const char *key,
     return true;
 }
 
+static bool json_boolean(const char *json, const char *key, bool *output)
+{
+    char pattern[96];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *position = strstr(json, pattern);
+    if (position == NULL) return false;
+    position = strchr(position + strlen(pattern), ':');
+    if (position == NULL) return false;
+    do { ++position; } while (*position == ' ' || *position == '\t');
+    if (strncmp(position, "true", 4) == 0) {
+        *output = true;
+        return true;
+    }
+    if (strncmp(position, "false", 5) == 0) {
+        *output = false;
+        return true;
+    }
+    return false;
+}
+
 static const char *json_array(const char *json, const char *key)
 {
     char pattern[96];
@@ -179,6 +199,122 @@ bool backend_fetch_orders(BackendClient *client, BackendOrder *orders,
     if (parsed) clear_error(client);
     else client->error_kind = BACKEND_ERROR_PARSE;
     return parsed;
+}
+
+static bool parse_catalog_json(const char *json, BackendCatalogItem *items,
+                               size_t capacity, size_t *count,
+                               const char *id_key, const char *name_key,
+                               const char *price_key,
+                               const char *available_key,
+                               char *error, size_t error_size)
+{
+    if (json == NULL || items == NULL || count == NULL || capacity == 0) {
+        snprintf(error, error_size, "상품 JSON 파싱 인자가 잘못됐습니다.");
+        return false;
+    }
+    *count = 0;
+    const char *cursor = json_array(json, "data");
+    if (cursor == NULL) {
+        snprintf(error, error_size, "상품 응답의 data 배열을 찾지 못했습니다.");
+        return false;
+    }
+    ++cursor;
+    while (*cursor && *cursor != ']') {
+        if (*count >= capacity) {
+            snprintf(error, error_size,
+                     "상품이 저장 한도 %zu건을 초과했습니다.", capacity);
+            return false;
+        }
+        const char *start = strchr(cursor, '{');
+        const char *array_end = strchr(cursor, ']');
+        if (start == NULL || (array_end != NULL && start > array_end)) break;
+        const char *end = json_object_end(start);
+        if (end == NULL) {
+            snprintf(error, error_size, "상품 JSON 객체가 끝나지 않았습니다.");
+            return false;
+        }
+        char *object = copy_json_object(start, end);
+        if (object == NULL) {
+            snprintf(error, error_size, "상품 JSON 메모리 할당 실패");
+            return false;
+        }
+        BackendCatalogItem *item = &items[(*count)++];
+        memset(item, 0, sizeof(*item));
+        bool valid = json_unsigned(object, id_key, &item->id) &&
+                     json_string(object, name_key, item->name,
+                                 sizeof(item->name)) &&
+                     json_unsigned(object, price_key, &item->price) &&
+                     json_boolean(object, available_key, &item->available) &&
+                     json_boolean(object, "isVisible", &item->visible);
+        free(object);
+        if (!valid || item->id == 0) {
+            snprintf(error, error_size, "상품 필수 필드가 누락됐습니다.");
+            return false;
+        }
+        cursor = end + 1;
+    }
+    return true;
+}
+
+bool backend_parse_menus_json(const char *json, BackendCatalogItem *items,
+                              size_t capacity, size_t *count,
+                              char *error, size_t error_size)
+{
+    return parse_catalog_json(json, items, capacity, count, "menuId",
+                              "menuName", "price", "isAvailable", error,
+                              error_size);
+}
+
+bool backend_parse_options_json(const char *json, BackendCatalogItem *items,
+                                size_t capacity, size_t *count,
+                                char *error, size_t error_size)
+{
+    return parse_catalog_json(json, items, capacity, count, "optionId",
+                              "optionName", "optionPrice",
+                              "optionIsAvailable", error, error_size);
+}
+
+static bool fetch_catalog(BackendClient *client, const char *path,
+                          BackendCatalogItem *items, size_t capacity,
+                          size_t *count, bool menus)
+{
+    if (!backend_is_authenticated(client)) {
+        set_error(client, "관리자 인증이 필요합니다.");
+        client->error_kind = BACKEND_ERROR_AUTH;
+        return false;
+    }
+    HttpResponse response;
+    if (http_request(client->base_url, "GET", path, client->token, NULL,
+                     &response, client->error, sizeof(client->error)) != 0)
+        return request_failed(client);
+    if (response.status_code < 200 || response.status_code >= 300) {
+        response_error(client, &response);
+        http_response_free(&response);
+        return false;
+    }
+    bool parsed = menus
+        ? backend_parse_menus_json(response.body, items, capacity, count,
+                                   client->error, sizeof(client->error))
+        : backend_parse_options_json(response.body, items, capacity, count,
+                                     client->error, sizeof(client->error));
+    http_response_free(&response);
+    if (parsed) clear_error(client);
+    else client->error_kind = BACKEND_ERROR_PARSE;
+    return parsed;
+}
+
+bool backend_fetch_menus(BackendClient *client, BackendCatalogItem *items,
+                         size_t capacity, size_t *count)
+{
+    return fetch_catalog(client, "/api/admin/menus", items, capacity, count,
+                         true);
+}
+
+bool backend_fetch_options(BackendClient *client, BackendCatalogItem *items,
+                           size_t capacity, size_t *count)
+{
+    return fetch_catalog(client, "/api/admin/options", items, capacity, count,
+                         false);
 }
 
 bool backend_parse_orders_json(const char *json, BackendOrder *orders,

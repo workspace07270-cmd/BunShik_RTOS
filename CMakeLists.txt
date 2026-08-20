@@ -37,6 +37,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 enable_testing()
 
 add_library(bunshik_core
+    src/admin_catalog_monitor.c
     src/admin_logger.c
     src/admin_service.c
     src/backend_client.c

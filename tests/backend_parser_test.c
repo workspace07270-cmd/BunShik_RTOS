@@ -67,6 +67,33 @@ int main(void)
     assert(strcmp(detail.items[1].components[0].component_menu_name,
                   "콜라") == 0);
 
+    const char *menus_json =
+        "{\"success\":true,\"data\":[{\"menuId\":1,"
+        "\"menuName\":\"떡볶이\",\"price\":4500,"
+        "\"isAvailable\":true,\"isVisible\":true}]}";
+    BackendCatalogItem catalog[2];
+    count = 0;
+    assert(backend_parse_menus_json(menus_json, catalog, 2, &count,
+                                    error, sizeof(error)));
+    assert(count == 1);
+    assert(catalog[0].id == 1);
+    assert(strcmp(catalog[0].name, "떡볶이") == 0);
+    assert(catalog[0].price == 4500);
+    assert(catalog[0].available && catalog[0].visible);
+
+    const char *options_json =
+        "{\"data\":[{\"optionId\":7,\"optionName\":\"치즈\","
+        "\"optionPrice\":500,\"optionIsAvailable\":false,"
+        "\"isVisible\":false}]}";
+    count = 0;
+    assert(backend_parse_options_json(options_json, catalog, 2, &count,
+                                      error, sizeof(error)));
+    assert(count == 1);
+    assert(catalog[0].id == 7);
+    assert(strcmp(catalog[0].name, "치즈") == 0);
+    assert(catalog[0].price == 500);
+    assert(!catalog[0].available && !catalog[0].visible);
+
     puts("backend parser tests passed");
     return 0;
 }

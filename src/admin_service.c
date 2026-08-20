@@ -1,7 +1,9 @@
 #include "admin_mode.h"
 
+#include "admin_catalog_monitor.h"
 #include "admin_logger.h"
 #include "backend_client.h"
+#include "order_priority.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "task.h"
@@ -19,7 +21,8 @@ typedef enum {
     ADMIN_EVENT_CONNECTED,
     ADMIN_EVENT_CONNECTION_LOST,
     ADMIN_EVENT_NEW_ORDER,
-    ADMIN_EVENT_STATUS_CHANGED
+    ADMIN_EVENT_STATUS_CHANGED,
+    ADMIN_EVENT_DELAYED_ORDER
 } AdminEventType;
 
 typedef struct {
@@ -27,6 +30,7 @@ typedef struct {
     BackendOrder order;
     char previous_status[BACKEND_TEXT_LENGTH];
     size_t order_count;
+    long wait_minutes;
 } AdminEvent;
 
 typedef struct {
@@ -36,6 +40,8 @@ typedef struct {
     QueueHandle_t events;
     BackendOrder previous[BACKEND_MAX_ORDERS];
     BackendOrder current[BACKEND_MAX_ORDERS];
+    unsigned int delayed_order_ids[BACKEND_MAX_ORDERS];
+    size_t delayed_order_count;
 } AdminService;
 
 static AdminService service;
@@ -48,10 +54,49 @@ static const BackendOrder *find_order(const BackendOrder *orders, size_t count,
     return NULL;
 }
 
-static void send_event(const AdminEvent *event)
+static bool send_event(const AdminEvent *event)
 {
-    if (xQueueSend(service.events, event, 0) != pdPASS)
+    if (xQueueSend(service.events, event, 0) != pdPASS) {
         admin_log(ADMIN_LOG_WARN, "관리자 이벤트 큐 가득 참: type=%d", event->type);
+        return false;
+    }
+    return true;
+}
+
+static bool contains_order_id(const unsigned int *ids, size_t count,
+                              unsigned int order_id)
+{
+    for (size_t index = 0; index < count; ++index)
+        if (ids[index] == order_id) return true;
+    return false;
+}
+
+/* 지연 상태에 처음 들어간 순간만 알리고, 해제된 주문은 알림 기록에서 뺍니다. */
+static void publish_delayed_orders(const BackendOrder *orders, size_t count)
+{
+    unsigned int still_delayed[BACKEND_MAX_ORDERS];
+    size_t still_delayed_count = 0;
+
+    for (size_t index = 0; index < count; ++index) {
+        if (order_urgency(&orders[index]) != ORDER_URGENCY_DELAYED) continue;
+        bool already_notified = contains_order_id(service.delayed_order_ids,
+                service.delayed_order_count, orders[index].order_id);
+        bool keep = already_notified;
+        if (!already_notified) {
+            AdminEvent event = {
+                .type = ADMIN_EVENT_DELAYED_ORDER,
+                .order = orders[index],
+                .wait_minutes = order_wait_minutes(&orders[index])
+            };
+            keep = send_event(&event);
+        }
+        if (keep && still_delayed_count < BACKEND_MAX_ORDERS)
+            still_delayed[still_delayed_count++] = orders[index].order_id;
+    }
+
+    memcpy(service.delayed_order_ids, still_delayed,
+           still_delayed_count * sizeof(still_delayed[0]));
+    service.delayed_order_count = still_delayed_count;
 }
 
 static void publish_changes(const BackendOrder *previous, size_t previous_count,
@@ -108,6 +153,14 @@ static void admin_event_task(void *parameter)
                     event.order.order_id, event.previous_status,
                     event.order.order_status);
             break;
+        case ADMIN_EVENT_DELAYED_ORDER:
+            printf("[AdminEventTask] 지연 주문: ID=%u 번호=%s 대기=%ld분\a\n",
+                    event.order.order_id, event.order.order_number,
+                    event.wait_minutes);
+            admin_log(ADMIN_LOG_WARN, "지연 주문: ID=%u 번호=%s 대기=%ld분",
+                    event.order.order_id, event.order.order_number,
+                    event.wait_minutes);
+            break;
         }
         fflush(stdout);
     }
@@ -157,6 +210,7 @@ static void admin_order_poll_task(void *parameter)
         }
         publish_changes(service.previous, previous_count, service.current,
                 current_count, has_snapshot);
+        publish_delayed_orders(service.current, current_count);
         memcpy(service.previous, service.current,
                 current_count * sizeof(service.current[0]));
         previous_count = current_count;
@@ -184,5 +238,7 @@ int admin_tasks_start(const char *backend_url, const char *username,
             != pdPASS) return EXIT_FAILURE;
     if (xTaskCreate(admin_order_poll_task, "AdminOrderPollTask", 8192, NULL, 3,
             NULL) != pdPASS) return EXIT_FAILURE;
+    if (admin_catalog_monitor_start(backend_url, username, password)
+            != EXIT_SUCCESS) return EXIT_FAILURE;
     return EXIT_SUCCESS;
 }

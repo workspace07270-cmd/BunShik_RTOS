@@ -9,6 +9,7 @@
 #define BACKEND_MAX_ITEMS 64
 #define BACKEND_MAX_OPTIONS 32
 #define BACKEND_MAX_COMPONENTS 32
+#define BACKEND_MAX_CATALOG_ITEMS 256
 
 typedef struct {
     unsigned int order_id;
@@ -48,6 +49,14 @@ typedef struct {
     size_t item_count;
 } BackendOrderDetail;
 
+typedef struct {
+    unsigned int id;
+    char name[BACKEND_TEXT_LENGTH];
+    unsigned int price;
+    bool available;
+    bool visible;
+} BackendCatalogItem;
+
 typedef struct BackendClient BackendClient;
 
 typedef enum {
@@ -64,6 +73,10 @@ bool backend_login(BackendClient *client, const char *username,
                    const char *password);
 bool backend_fetch_orders(BackendClient *client, BackendOrder *orders,
                           size_t capacity, size_t *count);
+bool backend_fetch_menus(BackendClient *client, BackendCatalogItem *items,
+                         size_t capacity, size_t *count);
+bool backend_fetch_options(BackendClient *client, BackendCatalogItem *items,
+                           size_t capacity, size_t *count);
 bool backend_fetch_order_detail(BackendClient *client, unsigned int order_id,
                                 BackendOrderDetail *detail);
 bool backend_update_status(BackendClient *client, unsigned int order_id,
@@ -88,5 +101,11 @@ bool backend_parse_orders_json(const char *json, BackendOrder *orders,
 bool backend_parse_order_detail_json(const char *json,
                                      BackendOrderDetail *detail,
                                      char *error, size_t error_size);
+bool backend_parse_menus_json(const char *json, BackendCatalogItem *items,
+                              size_t capacity, size_t *count,
+                              char *error, size_t error_size);
+bool backend_parse_options_json(const char *json, BackendCatalogItem *items,
+                                size_t capacity, size_t *count,
+                                char *error, size_t error_size);
 
 #endif
