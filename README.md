@@ -31,17 +31,38 @@ make setup  # 최초 한 번: 관리자 자동 로그인 계정 저장
 make run
 ```
 
-백엔드가 다른 주소라면 실행할 때 지정합니다.
+`make run`은 WSL의 Windows 호스트 주소를 자동으로 찾아 백엔드에 연결합니다.
+팀원마다 자기 Windows에서 백엔드를 실행한다면 별도의 주소를 입력하지 않아도
+됩니다. 자동 탐지가 맞지 않거나 다른 PC의 백엔드를 사용한다면 실행할 때 주소를
+직접 지정합니다.
 
 ```bash
-BUNSHIK_ADMIN_USERNAME=관리자아이디 \
-BUNSHIK_ADMIN_PASSWORD=관리자비밀번호 \
 make run BUNSHIK_API_BASE_URL=http://서버주소:8080
 ```
 
-기본 실행은 WSL의 현재 Windows 호스트 주소를 자동으로 찾아 8080 포트에
-연결합니다. 백엔드가 같은 PC가 아닌 별도 서버에 있을 때만 주소를 지정하면
-됩니다.
+백엔드와 RTOS를 모두 같은 WSL에서 실행한다면 다음 주소를 사용합니다.
+
+```bash
+make run BUNSHIK_API_BASE_URL=http://127.0.0.1:8080
+```
+
+백엔드를 Windows에서, RTOS를 WSL에서 실행할 때 자동 연결이 되지 않으면 WSL에서
+Windows 호스트 주소를 확인한 뒤 지정합니다.
+
+```bash
+ip route show default
+make run BUNSHIK_API_BASE_URL=http://default-via-뒤의-IP:8080
+```
+
+연결 여부는 RTOS 실행 전에 확인할 수 있습니다.
+
+```bash
+curl http://백엔드주소:8080/api/menus
+```
+
+Windows에서는 응답하지만 WSL에서는 연결되지 않는다면 Windows 방화벽에서 전체
+방화벽을 끄지 말고 TCP 8080 인바운드 규칙만 허용합니다. Spring Boot도 필요하면
+`server.address=0.0.0.0`으로 외부 인터페이스의 연결을 받도록 설정합니다.
 
 프로젝트를 다른 폴더나 다른 컴퓨터로 복사했을 때 기존 `build/`의 CMake
 경로가 달라도 `make run`이 이를 감지하고 build 생성물만 자동 재구성합니다.
@@ -61,35 +82,37 @@ cd build
 make run
 ```
 
-다른 백엔드 주소를 기본값으로 사용하려면 다시 구성합니다.
+다른 백엔드 주소를 사용하려면 다시 구성합니다.
 
 ```bash
 cmake -S . -B build -DBUNSHIK_API_BASE_URL=http://서버주소:8080
 ```
 
 실행 파일을 시작하면 명령을 입력하지 않습니다. 하나의 FreeRTOS 스케줄러에서
-고객 출력 태스크가 자동으로 시작됩니다. 관리자 계정 환경변수까지 설정하면
-관리자 자동 로그인·주문 감시 태스크도 동시에 시작됩니다. 주문
-상태 변경은 기존 React 관리자 화면에서 수행하며 RTOS는 변경을 자동 감지해
-이벤트 Queue로 전달합니다.
+관리자 자동 로그인·주문 감시 태스크와 고객 연결·출력 감시·인쇄 태스크가 모두
+자동으로 시작됩니다. 주문 상태 변경은 기존 React 관리자 화면에서 수행하며,
+RTOS는 변경을 자동 감지해 이벤트 Queue로 전달합니다. 종료할 때만 `Ctrl+C`를
+누릅니다.
 
-기본 백엔드 주소는 `http://127.0.0.1:8080`입니다. 다른 주소라면 실행 전에
-환경변수를 지정합니다.
-
-```bash
-BUNSHIK_API_BASE_URL=http://서버주소:8080 ./build/bunshik_rtos
-```
-
-CLI에서 `help`를 입력하면 명령 목록을 볼 수 있습니다.
+정상 연결되면 다음과 같은 메시지가 출력됩니다.
 
 ```text
-login 관리자아이디
-sync
-list active
-list received
-detail 260
-start 1
-complete 1
-cancel 2
-quit
+[AdminOrderPollTask] 관리자 자동 로그인 성공
+[BunShik Customer RTOS] 서버 연결 확인 완료: http://백엔드주소:8080
 ```
+
+## 프로젝트 폴더
+
+```text
+config/   FreeRTOS 설정
+include/  공개 헤더
+src/      RTOS 및 백엔드 연동 구현
+tests/    단위·연동 테스트
+build/    CMake 빌드 결과물
+logs/     실행 중 생성되는 관리자 로그
+```
+
+`build/`와 `logs/`는 삭제해도 다시 생성되며 Git에 포함되지 않습니다. 관리자
+계정이 저장되는 `.rtos.env`도 보안상 Git에 포함되지 않으므로 팀원마다
+`make setup`을 실행해야 합니다. `tests/`는 CMake가 참조하고 있으므로 폴더만
+삭제하면 빌드 구성이 실패합니다.
