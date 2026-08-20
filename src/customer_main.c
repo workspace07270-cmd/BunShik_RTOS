@@ -5,6 +5,7 @@
 #include "printer.h"
 #include "printer_paper.h"
 #include "FreeRTOS.h"
+#include "queue.h"
 #include "semphr.h"
 #include "task.h"
 
@@ -22,6 +23,7 @@
 static http_server_t spring_server;
 /* 토큰을 가진 폴링 태스크 하나만 새 출력 작업을 시작할 수 있습니다. */
 static SemaphoreHandle_t print_slot;
+static QueueHandle_t print_jobs;
 
 /*
  * 태스크를 만들기 전에 Spring Boot 서버가 응답하는지 확인합니다.
@@ -107,13 +109,11 @@ static const char *handle_job(const PrintJob *job)
     case PRINT_TYPE_RECEIPT:
         printf("[PrintTask] 영수증 출력 시작: id=%ld, 주문번호=%s\n", job->id, job->order_number);
         printer_print_receipt(job);
-        complete_job(job->id, "receipt printed");
-        break;
+        return "receipt printed";
     case PRINT_TYPE_ORDER_NUMBER:
         printf("[PrintTask] 주문번호표 출력 시작: id=%ld, 주문번호=%s\n", job->id, job->order_number);
         printer_print_order_number(job);
-        complete_job(job->id, "order number printed");
-        break;
+        return "order number printed";
     default:
         fprintf(stderr, "[PrintTask] 알 수 없는 출력 타입: id=%ld\n", job->id);
         return "unsupported print type";
@@ -121,20 +121,24 @@ static const char *handle_job(const PrintJob *job)
 }
 
 /*
- * 실제 인쇄를 처리하는 태스크입니다. PrintPollTask가 새 작업을 찾을 때마다
- * 힙에 복사해서 넘겨주며, 처리가 끝나면 스스로 삭제됩니다(day5의
- * worker_task와 같은 패턴).
+ * 실제 인쇄를 처리하는 영구 Worker Task입니다. 동적 Task를 매번 만들고
+ * 삭제하지 않고 Queue에서 작업을 기다리므로 작업 종료 시점의 메모리 충돌을
+ * 피할 수 있습니다.
  */
 static void print_task(void *parameter)
 {
-    PrintJob job = *(PrintJob *)parameter;
-    vPortFree(parameter);
+    (void)parameter;
+    PrintJob job;
 
-    const char *result = handle_job(&job);
-    complete_job_until_confirmed(job.id, result);
+    for (;;)
+    {
+        if (xQueueReceive(print_jobs, &job, portMAX_DELAY) != pdTRUE)
+            continue;
 
-    xSemaphoreGive(print_slot);
-    vTaskDelete(NULL);
+        const char *result = handle_job(&job);
+        complete_job_until_confirmed(job.id, result);
+        xSemaphoreGive(print_slot);
+    }
 }
 
 /* 1초 주기로 Spring Boot의 대기 중인 인쇄 작업을 polling합니다. */
@@ -150,18 +154,7 @@ static void print_poll_task(void *parameter)
 
             if (result == 1)
             {
-                PrintJob *job = pvPortMalloc(sizeof(*job));
-                if (job != NULL)
-                {
-                    *job = parsed;
-                    if (xTaskCreate(print_task, "PrintTask", 4096,
-                                    job, 3, NULL) != pdPASS)
-                    {
-                        vPortFree(job);
-                        xSemaphoreGive(print_slot);
-                    }
-                }
-                else
+                if (xQueueSend(print_jobs, &parsed, 0) != pdPASS)
                     xSemaphoreGive(print_slot);
             }
             else
@@ -191,8 +184,12 @@ static void customer_boot_task(void *parameter)
 
     /* 연결이 확인된 뒤에야 동기화 객체와 폴링 태스크를 만듭니다. */
     print_slot = xSemaphoreCreateBinary();
+    print_jobs = xQueueCreate(1, sizeof(PrintJob));
     configASSERT(print_slot != NULL);
+    configASSERT(print_jobs != NULL);
     xSemaphoreGive(print_slot);
+    configASSERT(xTaskCreate(print_task, "PrintTask",
+                             4096, NULL, 3, NULL) == pdPASS);
     configASSERT(xTaskCreate(print_poll_task, "PrintPollTask",
                              2048, NULL, 2, NULL) == pdPASS);
     vTaskDelete(NULL);
