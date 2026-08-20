@@ -46,6 +46,7 @@ add_library(bunshik_core
     src/order_priority.c
     src/print_job.c
     src/printer.c
+    src/printer_paper.c
     src/rtos_runtime.c
 )
 target_include_directories(bunshik_core PUBLIC include)

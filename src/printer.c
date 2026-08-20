@@ -1,13 +1,19 @@
 #include "printer.h"
+#include "printer_paper.h"
 
 #include <stdio.h>
+
+#define PAPER_SHEETS_PER_RECEIPT      1
+#define PAPER_SHEETS_PER_ORDER_NUMBER 1
 
 static void print_line(char ch, int width) {
     for (int i = 0; i < width; i++) putchar(ch);
     putchar('\n');
 }
 
-void printer_print_receipt(const PrintJob *job) {
+bool printer_print_receipt(const PrintJob *job) {
+    if (!printer_paper_consume(PAPER_SHEETS_PER_RECEIPT)) return false;
+
     printf("\n");
     print_line('=', 40);
     printf("           BUNSHIK RECEIPT\n");
@@ -27,9 +33,13 @@ void printer_print_receipt(const PrintJob *job) {
     printf("      이용해 주셔서 감사합니다\n");
     print_line('=', 40);
     printf("\n");
+
+    return true;
 }
 
-void printer_print_order_number(const PrintJob *job) {
+bool printer_print_order_number(const PrintJob *job) {
+    if (!printer_paper_consume(PAPER_SHEETS_PER_ORDER_NUMBER)) return false;
+
     printf("\n");
     print_line('*', 24);
     printf("    주 문 번 호\n");
@@ -38,4 +48,6 @@ void printer_print_order_number(const PrintJob *job) {
     printf("\n");
     print_line('*', 24);
     printf("\n");
+
+    return true;
 }

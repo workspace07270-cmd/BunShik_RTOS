@@ -3,6 +3,7 @@
 #include "customer_mode.h"
 #include "print_job.h"
 #include "printer.h"
+#include "printer_paper.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
 #include "task.h"
@@ -14,6 +15,7 @@
 #define POLL_INTERVAL_MS         1000
 #define RESPONSE_BUFFER_SIZE     4096
 #define SERVER_CHECK_RETRY_MS    2000
+#define PRINTER_PAPER_INITIAL_SHEETS 50
 
 static http_server_t spring_server;
 /* 토큰을 가진 폴링 태스크 하나만 새 출력 작업을 시작할 수 있습니다. */
@@ -64,13 +66,23 @@ static void handle_job(const PrintJob *job) {
     switch (job->type) {
     case PRINT_TYPE_RECEIPT:
         printf("[PrintTask] 영수증 출력 시작: id=%ld, 주문번호=%s\n", job->id, job->order_number);
-        printer_print_receipt(job);
-        complete_job(job->id, "receipt printed");
+        if (printer_print_receipt(job)) {
+            complete_job(job->id, "receipt printed");
+        } else {
+            fprintf(stderr,
+                    "[PrintTask] 용지 부족으로 영수증 출력을 보류합니다: id=%ld (다음 폴링에 재시도)\n",
+                    job->id);
+        }
         break;
     case PRINT_TYPE_ORDER_NUMBER:
         printf("[PrintTask] 주문번호표 출력 시작: id=%ld, 주문번호=%s\n", job->id, job->order_number);
-        printer_print_order_number(job);
-        complete_job(job->id, "order number printed");
+        if (printer_print_order_number(job)) {
+            complete_job(job->id, "order number printed");
+        } else {
+            fprintf(stderr,
+                    "[PrintTask] 용지 부족으로 번호표 출력을 보류합니다: id=%ld (다음 폴링에 재시도)\n",
+                    job->id);
+        }
         break;
     default:
         fprintf(stderr, "[PrintTask] 알 수 없는 출력 타입: id=%ld\n", job->id);
@@ -131,6 +143,8 @@ static void customer_boot_task(void *parameter)
         vTaskDelay(pdMS_TO_TICKS(SERVER_CHECK_RETRY_MS));
     }
     printf("[BunShik Customer RTOS] 서버 연결 확인 완료: %s\n", url);
+
+    printer_paper_init(PRINTER_PAPER_INITIAL_SHEETS);
 
     /* 연결이 확인된 뒤에야 동기화 객체와 폴링 태스크를 만듭니다. */
     print_slot = xSemaphoreCreateBinary();
