@@ -108,12 +108,17 @@ static const char *handle_job(const PrintJob *job)
     {
     case PRINT_TYPE_RECEIPT:
         printf("[PrintTask] 영수증 출력 시작: id=%ld, 주문번호=%s\n", job->id, job->order_number);
-        printer_print_receipt(job);
-        return "receipt printed";
+        if (printer_print_receipt(job)) return "receipt printed";
+        fprintf(stderr, "[PrintTask] 용지 부족으로 영수증 출력 실패: id=%ld\n",
+                job->id);
+        return "receipt print failed: paper out";
     case PRINT_TYPE_ORDER_NUMBER:
         printf("[PrintTask] 주문번호표 출력 시작: id=%ld, 주문번호=%s\n", job->id, job->order_number);
-        printer_print_order_number(job);
-        return "order number printed";
+        if (printer_print_order_number(job)) return "order number printed";
+        fprintf(stderr,
+                "[PrintTask] 용지 부족으로 주문번호표 출력 실패: id=%ld\n",
+                job->id);
+        return "order number print failed: paper out";
     default:
         fprintf(stderr, "[PrintTask] 알 수 없는 출력 타입: id=%ld\n", job->id);
         return "unsupported print type";

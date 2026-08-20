@@ -7,6 +7,7 @@
 
 static RtosMutex paper_mutex;
 static int paper_remaining;
+static bool paper_low_reported;
 
 void printer_paper_init(int initial_sheets)
 {
@@ -14,6 +15,7 @@ void printer_paper_init(int initial_sheets)
 
     rtos_mutex_lock(&paper_mutex);
     paper_remaining = initial_sheets > 0 ? initial_sheets : 0;
+    paper_low_reported = paper_remaining <= PRINTER_PAPER_LOW_THRESHOLD;
     rtos_mutex_unlock(&paper_mutex);
 
     admin_log(ADMIN_LOG_INFO, "[Printer] 용지 %d매로 초기화되었습니다.",
@@ -27,19 +29,23 @@ bool printer_paper_consume(int sheets_needed)
     rtos_mutex_lock(&paper_mutex);
 
     if (paper_remaining < sheets_needed) {
+        int remaining = paper_remaining;
         rtos_mutex_unlock(&paper_mutex);
         admin_log(ADMIN_LOG_ERROR,
                 "[Printer] 용지 부족으로 출력하지 못했습니다. 남은 용지: %d매",
-                paper_remaining);
+                remaining);
         return false;
     }
 
     paper_remaining -= sheets_needed;
     int remaining = paper_remaining;
+    bool report_low = remaining <= PRINTER_PAPER_LOW_THRESHOLD &&
+                      !paper_low_reported;
+    if (report_low) paper_low_reported = true;
 
     rtos_mutex_unlock(&paper_mutex);
 
-    if (remaining <= PRINTER_PAPER_LOW_THRESHOLD) {
+    if (report_low) {
         admin_log(ADMIN_LOG_WARN,
                 "[Printer] 용지가 얼마 남지 않았습니다. 남은 용지: %d매",
                 remaining);
@@ -55,6 +61,7 @@ void printer_paper_refill(int sheets)
     rtos_mutex_lock(&paper_mutex);
     paper_remaining += sheets;
     int remaining = paper_remaining;
+    if (remaining > PRINTER_PAPER_LOW_THRESHOLD) paper_low_reported = false;
     rtos_mutex_unlock(&paper_mutex);
 
     admin_log(ADMIN_LOG_INFO,

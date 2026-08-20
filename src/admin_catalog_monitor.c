@@ -33,11 +33,6 @@ static const BackendCatalogItem *find_item(const BackendCatalogItem *items,
     return NULL;
 }
 
-static bool selling(const BackendCatalogItem *item)
-{
-    return item->available && item->visible;
-}
-
 static void report_changes(const char *kind,
                            const BackendCatalogItem *previous,
                            size_t previous_count,
@@ -70,12 +65,24 @@ static void report_changes(const char *kind,
                       kind, current[index].id, old->price,
                       current[index].price);
         }
-        if (selling(old) != selling(&current[index])) {
+        /* isVisible은 관리자의 판매 중단/재개 상태입니다. 판매 중단 API는
+         * available도 함께 false로 바꾸므로 이 경우 품절 알림을 중복 출력하지
+         * 않고 판매 상태 변경 하나만 알립니다. */
+        if (old->visible != current[index].visible) {
             printf("[AdminCatalogTask] %s 판매 %s: %s\n", kind,
-                   selling(&current[index]) ? "재개" : "중단",
+                   current[index].visible ? "재개" : "중단",
                    current[index].name);
             admin_log(ADMIN_LOG_INFO, "%s 판매 %s: ID=%u 이름=%s", kind,
-                      selling(&current[index]) ? "재개" : "중단",
+                      current[index].visible ? "재개" : "중단",
+                      current[index].id, current[index].name);
+        /* isAvailable만 바뀌고 화면에 보이는 상품이면 품절/품절 해제입니다. */
+        } else if (current[index].visible &&
+                   old->available != current[index].available) {
+            printf("[AdminCatalogTask] %s %s: %s\n", kind,
+                   current[index].available ? "품절 해제" : "품절",
+                   current[index].name);
+            admin_log(ADMIN_LOG_INFO, "%s %s: ID=%u 이름=%s", kind,
+                      current[index].available ? "품절 해제" : "품절",
                       current[index].id, current[index].name);
         }
     }
