@@ -49,6 +49,7 @@ add_library(bunshik_core
     src/printer.c
     src/printer_paper.c
     src/rtos_runtime.c
+    src/system_monitor.c
 )
 target_include_directories(bunshik_core PUBLIC include)
 target_link_libraries(bunshik_core PUBLIC freertos_kernel freertos_config)

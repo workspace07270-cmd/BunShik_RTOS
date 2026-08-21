@@ -4,6 +4,7 @@
 #include "print_job.h"
 #include "printer.h"
 #include "printer_paper.h"
+#include "system_monitor.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "semphr.h"
@@ -197,6 +198,7 @@ static void customer_boot_task(void *parameter)
                              4096, NULL, 3, NULL) == pdPASS);
     configASSERT(xTaskCreate(print_poll_task, "PrintPollTask",
                              2048, NULL, 2, NULL) == pdPASS);
+    configASSERT(system_monitor_start(print_jobs) == EXIT_SUCCESS);
     vTaskDelete(NULL);
 }
 
