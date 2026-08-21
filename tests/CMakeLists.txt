@@ -13,3 +13,7 @@ add_test(NAME admin_logger_test COMMAND admin_logger_test)
 add_executable(customer_rtos_test customer_rtos_test.c)
 target_link_libraries(customer_rtos_test PRIVATE bunshik_core)
 add_test(NAME customer_rtos_test COMMAND customer_rtos_test)
+
+add_executable(printer_test printer_test.c)
+target_link_libraries(printer_test PRIVATE bunshik_core)
+add_test(NAME printer_test COMMAND printer_test)

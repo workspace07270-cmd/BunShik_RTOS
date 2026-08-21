@@ -22,6 +22,7 @@ typedef enum {
     ADMIN_EVENT_CONNECTION_LOST,
     ADMIN_EVENT_NEW_ORDER,
     ADMIN_EVENT_STATUS_CHANGED,
+    ADMIN_EVENT_ORDER_CANCELLED,
     ADMIN_EVENT_DELAYED_ORDER
 } AdminEventType;
 
@@ -117,6 +118,18 @@ static void publish_changes(const BackendOrder *previous, size_t previous_count,
             send_event(&event);
         }
     }
+
+    /* 백엔드의 기본 주문 목록은 취소된 주문을 제외합니다. 따라서 직전
+     * 목록에는 있었지만 현재 목록에서 사라진 주문을 취소로 판정합니다. */
+    for (size_t index = 0; index < previous_count; ++index) {
+        if (find_order(current, current_count, previous[index].order_id) == NULL) {
+            AdminEvent event = {
+                .type = ADMIN_EVENT_ORDER_CANCELLED,
+                .order = previous[index]
+            };
+            send_event(&event);
+        }
+    }
 }
 
 static void admin_event_task(void *parameter)
@@ -151,6 +164,14 @@ static void admin_event_task(void *parameter)
                     event.order.order_status);
             admin_log(ADMIN_LOG_INFO, "주문 상태 변경: ID=%u %s -> %s",
                     event.order.order_id, event.previous_status,
+                    event.order.order_status);
+            break;
+        case ADMIN_EVENT_ORDER_CANCELLED:
+            printf("[AdminEventTask] 주문 취소: ID=%u 번호=%s 이전상태=%s\a\n",
+                    event.order.order_id, event.order.order_number,
+                    event.order.order_status);
+            admin_log(ADMIN_LOG_WARN, "주문 취소: ID=%u 번호=%s 이전상태=%s",
+                    event.order.order_id, event.order.order_number,
                     event.order.order_status);
             break;
         case ADMIN_EVENT_DELAYED_ORDER:
