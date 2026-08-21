@@ -3,9 +3,11 @@
 
 #include <stddef.h>
 
-#define PRINT_ORDER_NUMBER_LENGTH 32
-#define PRINT_ITEM_NAME_LENGTH    64
-#define PRINT_JOB_MAX_ITEMS       20
+#define PRINT_ORDER_NUMBER_LENGTH  32
+#define PRINT_ORDER_TYPE_LENGTH    24
+#define PRINT_PAYMENT_METHOD_LENGTH 32
+#define PRINT_ITEM_NAME_LENGTH     64
+#define PRINT_JOB_MAX_ITEMS        20
 
 typedef enum {
     PRINT_TYPE_RECEIPT,
@@ -23,10 +25,13 @@ typedef struct {
     long id;
     PrintJobType type;
     char order_number[PRINT_ORDER_NUMBER_LENGTH];
+    char order_type[PRINT_ORDER_TYPE_LENGTH];
+    char payment_method[PRINT_PAYMENT_METHOD_LENGTH];
     PrintItem items[PRINT_JOB_MAX_ITEMS];
     int item_count;
     int total_price;
 } PrintJob;
+
 
 /*
  * Spring Boot의 GET /api/print-jobs/pending 응답 JSON을 파싱합니다.

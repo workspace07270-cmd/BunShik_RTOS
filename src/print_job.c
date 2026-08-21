@@ -98,6 +98,12 @@ int print_job_parse_pending(const char *json, PrintJob *job) {
     if (json_string(data, "order_number", job->order_number, sizeof(job->order_number)) != 0)
         return -1;
 
+    if (json_string(data, "order_type", job->order_type, sizeof(job->order_type)) != 0)
+        return -1;
+
+    if (json_string(data, "payment_method", job->payment_method, sizeof(job->payment_method)) != 0)
+        return -1;
+
     if (json_int(data, "total_price", &job->total_price) != 0) return -1;
 
     if (job->type == PRINT_TYPE_RECEIPT) {
